@@ -1,4 +1,4 @@
-﻿using FreneticUtilities.FreneticExtensions;
+using FreneticUtilities.FreneticExtensions;
 using FreneticUtilities.FreneticToolkit;
 using Newtonsoft.Json.Linq;
 using SwarmUI.Accounts;
@@ -38,7 +38,14 @@ public static class ComfyUIWebAPI
         Directory.CreateDirectory(Directory.GetParent(path).FullName);
         if (!string.IsNullOrWhiteSpace(image))
         {
-            image = ImageFile.FromDataString(image).ToMetadataFormat();
+            if (image == "clear")
+            {
+                image = null;
+            }
+            else
+            {
+                image = ImageFile.FromDataString(image).ToMetadataFormat();
+            }
         }
         else if (ComfyUIBackendExtension.CustomWorkflows.ContainsKey(origPath))
         {
@@ -163,7 +170,7 @@ public static class ComfyUIWebAPI
     /// <summary>API route to read the node types for a specific backend.</summary>
     public static async Task<JObject> ComfyGetNodeTypesForBackend(Session session, int backend)
     {
-        if (Program.Backends.T2IBackends.TryGetValue(backend, out BackendHandler.T2IBackendData data) && data.Backend is ComfyUIAPIAbstractBackend comfyBack)
+        if (Program.Backends.AllBackends.TryGetValue(backend, out BackendHandler.BackendData data) && data.AbstractBackend is ComfyUIAPIAbstractBackend comfyBack)
         {
             return new JObject() { ["node_types"] = JArray.FromObject(comfyBack.NodeTypes.ToList()) };
         }

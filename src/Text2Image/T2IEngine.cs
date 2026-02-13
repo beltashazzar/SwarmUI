@@ -36,7 +36,7 @@ namespace SwarmUI.Text2Image
         public static Action<PostBatchEventParams> PostBatchEvent;
 
         /// <summary>Feature flags that don't block a backend from running, such as model-specific flags.</summary>
-        public static HashSet<string> DisregardedFeatureFlags = ["sd3", "flux-dev", "text2video", "cascade", "sdxl"];
+        public static HashSet<string> DisregardedFeatureFlags = ["sd3", "flux-dev", "text2video", "cascade", "sdxl", "text2audio"];
 
         /// <summary>Parameters for <see cref="PostBatchEvent"/>.</summary>
         public record class PostBatchEventParams(T2IParamInput UserInput, ImageOutput[] Images);
@@ -349,7 +349,7 @@ namespace SwarmUI.Text2Image
                         ex = e2;
                     }
                 }
-                if (ex is AbstractT2IBackend.PleaseRedirectException)
+                if (ex is AbstractBackend.PleaseRedirectException)
                 {
                     claim.Extend(gens: 1);
                     await CreateImageTask(user_input, batchId, claim, output, setError, isWS, backendTimeoutMin, saveImages, false);

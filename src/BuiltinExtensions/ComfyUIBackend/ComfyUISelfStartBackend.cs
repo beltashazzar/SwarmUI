@@ -1,4 +1,7 @@
-﻿
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Runtime.InteropServices;
 using FreneticUtilities.FreneticDataSyntax;
 using FreneticUtilities.FreneticExtensions;
 using FreneticUtilities.FreneticToolkit;
@@ -7,9 +10,6 @@ using SwarmUI.Backends;
 using SwarmUI.Core;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
-using System.Diagnostics;
-using System.IO;
-using System.Runtime.InteropServices;
 
 namespace SwarmUI.Builtin_ComfyUIBackend;
 
@@ -82,7 +82,7 @@ public class ComfyUISelfStartBackend : ComfyUIAPIAbstractBackend
         // Example: ["ComfyUI-TeaCache"] = "b3429ef3dea426d2f167e348b44cd2f5a3674e7d"
     };
 
-    public static string SwarmValidatedFrontendVersion = "1.34.9";
+    public static string SwarmValidatedFrontendVersion = "1.38.13";
 
     /// <summary>List of known required python packages, as pairs of strings: Item1 is the folder name within python packages to look for, Item2 is the pip install command.</summary>
     public static List<(string, string)> RequiredPythonPackages =
@@ -110,11 +110,12 @@ public class ComfyUISelfStartBackend : ComfyUIAPIAbstractBackend
     /// <summary>List of required python packages that need a specific version, in structure (string libFolder, string pipName, string rel, string version).</summary>
     public static List<(string, string, string, string)> RequiredVersionPythonPackages =
     [
+        ("diffusers", "diffusers", ">=", "0.36.0"),
         ("aiohttp", "aiohttp", ">=", "3.11.8"),
         ("yarl", "yarl", ">=", "1.18.0"),
         ("av", "av", ">=", "14.2.0"),
         ("spandrel", "spandrel", ">=", "0.4.1"),
-        ("transformers", "transformers", ">=", "4.50.3"),
+        ("transformers", "transformers", ">=", "4.57.3"),
         ("ultralytics", "ultralytics", "==", "8.3.197"), // This is hard-pinned due to the malicious 8.3.41 incident, only manual updates when needed until security practices are improved.
         ("pip", "pip", ">=", "25.0") // Don't need latest, just can't be too old, this is mostly just here for a sanity check.
     ];
@@ -499,7 +500,7 @@ public class ComfyUISelfStartBackend : ComfyUIAPIAbstractBackend
                 await pipCall($"Updating '{name}'", $"install {pip}");
                 libs.Add(name);
             }
-            string getVers(string package)
+            string getRawVersion(string package)
             {
                 string prefix = $"{package}-";
                 string dir = distinfos.FirstOrDefault(d => d.StartsWith(prefix));
@@ -507,7 +508,11 @@ public class ComfyUISelfStartBackend : ComfyUIAPIAbstractBackend
                 {
                     return null;
                 }
-                return dir[prefix.Length..].Before(".dist-info").Before('+');
+                return dir[prefix.Length..].Before(".dist-info");
+            }
+            string getVers(string package)
+            {
+                return getRawVersion(package)?.Before('+');
             }
             if (!libs.Contains("pip"))
             {
@@ -567,7 +572,7 @@ public class ComfyUISelfStartBackend : ComfyUIAPIAbstractBackend
                 await update("comfyui_workflow_templates", $"comfyui-workflow-templates=={templateVers}");
             }
             string actualEmbedVers = getVers("comfyui_embedded_docs");
-            if ((doFixFrontend || doLatestFrontend) && reqs.TryGetValue("comfyui-embedded-docs", out Version embedDocsVers) && (actualEmbedVers is null || embedDocsVers < Version.Parse(actualEmbedVers)))
+            if ((doFixFrontend || doLatestFrontend) && reqs.TryGetValue("comfyui-embedded-docs", out Version embedDocsVers) && (actualEmbedVers is null || Version.Parse(actualEmbedVers) < embedDocsVers))
             {
                 await update("comfyui_embedded_docs", $"comfyui-embedded-docs=={embedDocsVers}");
             }
@@ -578,6 +583,16 @@ public class ComfyUISelfStartBackend : ComfyUIAPIAbstractBackend
             else if (!doFixFrontend)
             {
                 await install("comfyui_frontend_package", "comfyui-frontend-package");
+            }
+            string actualKitchenVers = getVers("comfy_kitchen");
+            if (reqs.TryGetValue("comfy-kitchen", out Version kitchenVers) && (actualKitchenVers is null || Version.Parse(actualKitchenVers) < kitchenVers))
+            {
+                await update("comfy_kitchen", $"comfy-kitchen=={kitchenVers}");
+            }
+            string actualAimdoVers = getVers("comfy_aimdo");
+            if (reqs.TryGetValue("comfy-aimdo", out Version aimdoVers) && (actualAimdoVers is null || Version.Parse(actualAimdoVers) < aimdoVers))
+            {
+                await update("comfy_aimdo", $"comfy-aimdo=={aimdoVers}");
             }
             if (Directory.Exists($"{ComfyUIBackendExtension.Folder}/DLNodes/ComfyUI_IPAdapter_plus") || Directory.Exists($"{ComfyUIBackendExtension.Folder}/DLNodes/ComfyUI-nunchaku"))
             {
@@ -638,21 +653,28 @@ public class ComfyUISelfStartBackend : ComfyUIAPIAbstractBackend
                     isValid = false;
                 }
                 string osVers = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "win_amd64" : "linux_x86_64";
-                string torchPipVers = getVers("torch");
+                (string torchPipVers, string cudaVers) = getRawVersion("torch").BeforeAndAfter('+');
                 string torchVers = "2.8";
-                if (torchPipVers.StartsWith("2.5.")) { torchVers = "2.5"; }
-                else if (torchPipVers.StartsWith("2.6.")) { torchVers = "2.6"; }
-                else if (torchPipVers.StartsWith("2.7.")) { torchVers = "2.7"; }
-                else if (torchPipVers.StartsWith("2.8.")) { torchVers = "2.8"; }
+                if (torchPipVers.StartsWith("2.8.")) { torchVers = "2.8"; }
                 else if (torchPipVers.StartsWith("2.9.")) { torchVers = "2.9"; }
+                else if (torchPipVers.StartsWith("2.10.")) { torchVers = "2.10"; }
+                else if (torchPipVers.StartsWith("2.11.")) { torchVers = "2.11"; }
                 else
                 {
-                    Logs.Error($"Nunchaku is not currently supported on your Torch version ({torchPipVers} not in range [2.5, 2.9]).");
+                    Logs.Error($"Nunchaku is not currently supported on your Torch version, you have torch {torchPipVers} but you need at least Torch 2.8 (up to 2.11).");
                     isValid = false;
                 }
-                string nunchakuTargetVersion = "1.0.2";
-                // eg https://github.com/nunchaku-tech/nunchaku/releases/download/v0.3.2/nunchaku-0.3.2+torch2.5-cp310-cp310-linux_x86_64.whl
-                string url = $"https://github.com/nunchaku-tech/nunchaku/releases/download/v{nunchakuTargetVersion}/nunchaku-{nunchakuTargetVersion}+torch{torchVers}-cp{pyVers}-cp{pyVers}-{osVers}.whl";
+                string cutarget = "cu12.8";
+                if (cudaVers == "cu128") { cutarget = "cu12.8"; }
+                else if (cudaVers == "cu130") { cutarget = "cu13.0"; }
+                else
+                {
+                    Logs.Error($"Nunchaku is not currently supported on your Torch CUDA version, you have torch+{cudaVers} but you need cu12.8 or cu13.0.");
+                    isValid = false;
+                }
+                string nunchakuTargetVersion = "1.2.1";
+                // eg https://github.com/nunchaku-ai/nunchaku/releases/download/v1.2.1/nunchaku-1.2.1+cu12.8torch2.10-cp310-cp310-linux_x86_64.whl
+                string url = $"https://github.com/nunchaku-tech/nunchaku/releases/download/v{nunchakuTargetVersion}/nunchaku-{nunchakuTargetVersion}+{cutarget}torch{torchVers}-cp{pyVers}-cp{pyVers}-{osVers}.whl";
                 if (isValid)
                 {
                     string nunchakuVers = getVers("nunchaku");

@@ -2,14 +2,14 @@
 
 | Model | Architecture | Year | Author | Scale | Censored? | Quality/Status |
 | ----  | ---- | ---- | ---- | ---- | ---- | ---- |
-[Stable Diffusion XL](#stable-diffusion-xl) | unet | 2023 | Stability AI | 2B | Partial | Older but some finetunes are worth using |
+[Stable Diffusion XL](#stable-diffusion-xl) | unet | 2023 | Stability AI | 2B | Partial | Old but some finetunes remain popular |
 [SD1 and SDXL Turbo Variants](#sd1-and-sdxl-turbo-variants) | unet | 2023 | Stability AI and others | 2B | Partial | Outdated |
 [Stable Diffusion 3](#stable-diffusion-3) | MMDiT | 2024 | Stability AI | 2B | Yes | Outdated, prefer 3.5 |
-[Stable Diffusion 3.5 Large](#stable-diffusion-35-large) | MMDiT | 2024 | Stability AI | 8B | Partial | Recent, Good Quality |
-[Stable Diffusion 3.5 Medium](#stable-diffusion-35-medium) | MMDiT | 2024 | Stability AI | 2B | Partial | Recent, Good Quality |
+[Stable Diffusion 3.5 Large](#stable-diffusion-35-large) | MMDiT | 2024 | Stability AI | 8B | Partial | Outdated, Good Quality for its time |
+[Stable Diffusion 3.5 Medium](#stable-diffusion-35-medium) | MMDiT | 2024 | Stability AI | 2B | Partial | Outdated, Good Quality for its time |
 [AuraFlow](#auraflow) | MMDiT | 2024 | Fal.AI | 6B | Yes | Outdated |
-[Flux.1](#black-forest-labs-flux1-models) | MMDiT | 2024 | Black Forest Labs | 12B | Partial | Recent, High Quality |
-[Flux.2](#flux-2) | MMDiT | 2025 | Black Forest Labs | 32B | Minimal | Recent, Incredible Quality, extremely memory intense |
+[Flux.1](#black-forest-labs-flux1-models) | MMDiT | 2024 | Black Forest Labs | 12B | Partial | Outdated, High Quality for its time |
+[Flux.2](#flux-2) | MMDiT | 2025 | Black Forest Labs | 4B, 9B, 32B | Minimal | Recent, Incredible Quality, choice of speed or quality preference |
 [Chroma](#chroma) | MMDiT | 2025 | Lodestone Rock | 8.9B  | No | Recent, Decent Quality |
 [Chroma Radiance](#chroma-radiance) | Pixel MMDiT | 2025 | Lodestone Rock | 8.9B  | No | Recent, Bad Quality (WIP) |
 [Lumina 2.0](#lumina-2) | NextDiT | 2025 | Alpha-VLLM | 2.6B | Partial | Modern, Passable Quality |
@@ -17,6 +17,7 @@
 [Hunyuan Image 2.1](#hunyuan-image-21) | MMDiT | 2025 | Tencent | 17B | No | Modern, Great Quality, very memory intense |
 [Z-Image](#z-image) | S3-DiT | 2025 | Tongyi MAI (Alibaba) | 6B | No | Modern, Great Quality, lightweight |
 [Kandinsky 5](#kandinsky-5) | DiT | 2025 | Kandinsky Lab | 6B | No | Modern, Decent Quality |
+[Anima](#anima) | DiT | 2026 | Circlestone Labs | 2B | WTF | Modern, very small, decent for anime |
 
 Old or bad options also tracked listed via [Obscure Model Support](/docs/Obscure%20Model%20Support.md):
 
@@ -45,18 +46,20 @@ Old or bad options also tracked listed via [Obscure Model Support](/docs/Obscure
     - "No" means it generates what was asked,
     - "Minimal" means it's eg missing genitals but otherwise complete,
     - "Partial" means it's clearly undertrained at NSFW content (eg difficult to prompt for or poor quality body) but doesn't explicitly refuse,
-    - "Yes" means it's entirely incapable or provides an explicit refusal response.
+    - "Yes" means it's entirely incapable or provides an explicit refusal response,
+    - "WTF" means it's the opposite of censored, may generate inappropriate content even without being asked.
 - **Quality/Status** is a loose vibe-based metric to imply whether it's worth using in the current year or not.
 
 - Video models are in [Video Model Support](/docs/Video%20Model%20Support.md)
+- Audio models are in [Audio Model Support](/docs/Audio%20Model%20Support.md)
 
 # Current Recommendations
 
-Image model(s) most worth using, as of April 2025:
+Image model(s) most worth using, as of January 2026:
 
-- Flux Dev in Nunchaku format for best speed/quality combo
-- SDXL finetunes for best broad availability of finetunes and loras, at high speed (with limited quality), especially for anime-style usage
-- HiDream for best base model quality and least censorship, at cost of speed (especially with limited PC hardware)
+- Z-Image is the best right now, especially for photoreal gens.
+- Flux.2 Klein is pretty great too, for Editing or for art style variety.
+- Flux.2 Dev is massive, but is the smartest of the bunch if you have the hardware and patience for it.
 
 # General Info
 
@@ -92,6 +95,11 @@ Image model(s) most worth using, as of April 2025:
 SDXL models work as normal, with the bonus that by default enhanced inference settings will be used (eg scaled up rescond).
 
 Additional, SDXL-Refiner architecture models can be inferenced, both as refiner or even as a base (you must manually set res to 512x512 and it will generate weird results).
+
+### SDXL Controlnets
+
+- There are official SDXL ControlNet LoRAs from Stability AI [here](https://huggingface.co/stabilityai/control-lora)
+- and there's a general collection of community ControlNet models [here](https://huggingface.co/lllyasviel/sd_control_collection/tree/main) that you can use.
 
 # SD1 and SDXL Turbo Variants
 
@@ -259,15 +267,20 @@ For upscaling with SD3, the `Refiner Do Tiling` parameter is highly recommended 
 ![img](/docs/images/models/flux2.jpg)
 
 - Black Forest Labs' [Flux.2 Models](https://bfl.ai/blog/flux-2) are supported in SwarmUI
-- It is an extremely massive model (32B diffusion model, 24B text encoder) that will demand significant RAM availability on your PC.
+- The main "Dev" model is an extremely massive model (32B diffusion model, 24B text encoder) that will demand significant RAM availability on your PC.
     - This can easily fill up 128 gigs of system RAM in usage, but does still work on 64 gig systems. Lower than 64 may not be possible, or may require heavily using swapfile.
+    - The smaller [Klein model](#flux2-klein) is preferred for more normal PC hardware.
 - Download the standard FP8 model here [silveroxides/FLUX.2-dev-fp8_scaled](<https://huggingface.co/silveroxides/FLUX.2-dev-fp8_scaled/blob/main/flux2-dev-fp8mixedfromscaled.safetensors>)
-    - Or GGUF version here [orabazes/FLUX.2-dev-GGUF](<https://huggingface.co/orabazes/FLUX.2-dev-GGUF/tree/main>)
+    - Or GGUF version here [city96/FLUX.2-dev-GGUF](<https://huggingface.co/city96/FLUX.2-dev-gguf/tree/main>)
     - Goes in `diffusion_models` folder
+    - There's also a turbo model here [silveroxides/flux2-dev-turbo-fp8mixed.safetensors](<https://huggingface.co/silveroxides/FLUX.2-dev-fp8_scaled/blob/main/flux2-dev-turbo-fp8mixed.safetensors>)
+         - or as a lora [fal/Flux_2-Turbo-LoRA_comfyui.safetensors](<https://huggingface.co/fal/FLUX.2-dev-Turbo/blob/main/comfy/Flux_2-Turbo-LoRA_comfyui.safetensors>)
+         - Use scheduler `Align Your Steps` at exactly 8 steps to select the special Flux2-dev-turbo custom scheduler. Difference is minimal though.
 - The VAE is a brand new 16x16 downsample VAE with 128 channels. It will be autodownloaded.
     - You can swap it for this one [CabalResearch/Flux2VAE-Anime-Decoder-Tune](<https://huggingface.co/CabalResearch/Flux2VAE-Anime-Decoder-Tune/blob/main/Flux2Anime%20VAE%20DecB1.safetensors>) which is a finetune to reduce detail artifacting.
 - The Text Encoder is 24B Mistral Small 3.2 (2506). It will be autodownloaded.
-    - This would make sense to replace with a GGUF. (Pending gguf download link)
+    - There's a GGUF about half the size here [mcmonkey/flux2MistralGGUF](<https://huggingface.co/mcmonkey/Flux2MistralGGUF/blob/main/Mistral-Small-3.2-24B-Instruct-2506-Q4_K_M-flux2fixed.gguf>)
+        - Select via the advanced `Mistral Model` parameter
 - **Parameters:**
     - **Prompt:** Prompting guide from the model creators here <https://docs.bfl.ai/guides/prompting_guide_flux2>
         - Notably, they trained heavily on complex JSON structured prompts to allow for very complex scene control, though this is not required
@@ -280,6 +293,25 @@ For upscaling with SD3, the `Refiner Do Tiling` parameter is highly recommended 
     - **Sampler:** Defaults to regular `Euler`
     - **Scheduler:** Defaults to `Flux2`, a new specialty scheduler added for Flux.2 to use, but it makes very little difference
     - **Prompt Images:** add up to a max of 6 images to the prompt box to be used as reference images. This uses significantly more memory.
+
+### Flux.2 Klein
+
+- Klein is a smaller variant of Flux.2
+    - It is lower quality vs the full Flux.2-Dev, but runs much faster. Certain aspects of the quality can actually be better, notably visual quality seems to have been tuned better, overall intelligence is lower.
+    - There is a 4B and a 9B variant, while the 9B is larger it often seems like the 4B is smarter.
+    - It uses a smaller text encoder (Qwen 4B for Klein 4B, and Qwen 8B for Klein 9B). It will be autodownloaded.
+    - Download [Klein 4b here](<https://huggingface.co/Comfy-Org/flux2-klein-4B/tree/main/split_files/diffusion_models>)
+        - or a [gguf here](<https://huggingface.co/unsloth/FLUX.2-klein-4B-GGUF/blob/main/flux-2-klein-4b-Q4_K_M.gguf>) or [base gguf here](<https://huggingface.co/unsloth/FLUX.2-klein-base-4B-GGUF/blob/main/flux-2-klein-base-4b-Q4_K_M.gguf>)
+        - It has a distilled variant (Steps=8, CFG=1), and a "Base" variant (high steps, high CFG)
+    - or [Klein 9b here](<https://huggingface.co/black-forest-labs/FLUX.2-klein-9B/blob/main/flux-2-klein-9b.safetensors>) (you may need to [accept a license here](<https://huggingface.co/black-forest-labs/FLUX.2-klein-9B>))
+        - or a [gguf here](<https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF/blob/main/flux-2-klein-9b-Q4_K_M.gguf>)
+    - or [klein 9b base here](<https://huggingface.co/black-forest-labs/FLUX.2-klein-base-9b-fp8/blob/main/flux-2-klein-base-9b-fp8.safetensors>)
+        - or a [gguf here](<https://huggingface.co/unsloth/FLUX.2-klein-base-9B-GGUF/blob/main/flux-2-klein-base-9b-Q4_K_M.gguf>)
+    - Save the file into `diffusion_models`
+    - Broadly works the same as Flux.2-Dev
+    - On the distilled model set `Steps` to `8`, on base model use normal high step counts
+    - On the distilled model set `CFG Scale` to `1`, on base model use normal CFG eg `7`
+    - They have an [official prompting guide here](<https://docs.bfl.ai/guides/prompting_guide_flux2_klein>)
 
 # Chroma
 
@@ -354,11 +386,12 @@ For upscaling with SD3, the `Refiner Do Tiling` parameter is highly recommended 
 # Qwen Image
 
 ![img](/docs/images/models/qwen-image.jpg)
-*(Qwen Image ran at CFG=4, Steps=50, Res=1328x1328. This took me about 3 minutes per image. This comparison is unfair to the other models, but this model seems intended to be a 'slow but smart' model, so this is the way to run it for now. The test prompt seems to be particular hard on Qwen Image, I promise it's smarter than this makes it look lol.)*
+*(Qwen Image ran at CFG=4, Steps=50, Res=1328x1328. This took me about 3 minutes per image. This comparison is unfair to the other models, but this model seems intended to be a 'slow but smart' model, so this is the way to run it for now. The test prompt seems to be particularly hard on Qwen Image, I promise it's smarter than this makes it look lol.)*
 
 - [Qwen Image](https://huggingface.co/Qwen/Qwen-Image) is natively supported in SwarmUI.
     - Download the model here [Comfy-Org/Qwen-Image_ComfyUI](<https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/tree/main/split_files/diffusion_models>)
         - There's an fp8 and a bf16 variant available. The fp8 model is highly recommended.
+        - There's the 2512 version and the original available. 2512 is newer and better.
         - Or, for nunchaku accelerated version that uses a bit less VRAM and runs faster, [nunchaku-tech/nunchaku-qwen-image](<https://huggingface.co/nunchaku-tech/nunchaku-qwen-image/tree/main>)
         - Or, other option for limited memory space, GGUF versions [city96/Qwen-Image-gguf](<https://huggingface.co/city96/Qwen-Image-gguf/tree/main>)
         - Or a distilled version here [qwen_image_distill_full_fp8_e4m3fn](<https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/blob/main/non_official/diffusion_models/qwen_image_distill_full_fp8_e4m3fn.safetensors>)
@@ -400,9 +433,10 @@ For upscaling with SD3, the `Refiner Do Tiling` parameter is highly recommended 
 ### Qwen Image Edit
 
 - The Qwen Image **Edit** model can be downloaded here: [Comfy-Org/Qwen-Image-Edit_ComfyUI](<https://huggingface.co/Comfy-Org/Qwen-Image-Edit_ComfyUI/tree/main/split_files/diffusion_models>)
-    - Or GGUF version here: [QuantStack/Qwen-Image-Edit-2509-GGUF](<https://huggingface.co/QuantStack/Qwen-Image-Edit-2509-GGUF/tree/main>) (or old version [QuantStack/Qwen-Image-Edit-GGUF](<https://huggingface.co/QuantStack/Qwen-Image-Edit-GGUF/tree/main>))
+    - `qwen_image_edit_2511_fp8mixed` recommended currently
+    - Or GGUF version here: [unsloth/Qwen-Image-Edit-2511-GGUF](<https://huggingface.co/unsloth/Qwen-Image-Edit-2511-GGUF/blob/main/qwen-image-edit-2511-Q4_K_M.gguf>) or old 2509 [QuantStack/Qwen-Image-Edit-2509-GGUF](<https://huggingface.co/QuantStack/Qwen-Image-Edit-2509-GGUF/tree/main>) (or old version [QuantStack/Qwen-Image-Edit-GGUF](<https://huggingface.co/QuantStack/Qwen-Image-Edit-GGUF/tree/main>))
     - Or nunchaku version here: [nunchaku-qwen-image-edit-2509](<https://huggingface.co/nunchaku-tech/nunchaku-qwen-image-edit-2509/tree/main>) (or old version [nunchaku-qwen-image-edit](<https://huggingface.co/nunchaku-tech/nunchaku-qwen-image-edit/tree/main>))
-    - The architecture cannot be autodetected and must be set manually.
+    - For original Edit or v2509, the architecture cannot be autodetected and must be set manually. 2511 can autodetect.
         - Click the `☰` hamburger menu on a model, then `Edit Metadata`, then change `Architecture` to `Qwen Image Edit Plus` and hit `Save`
             - For the original model (prior to 2509), use `Qwen Image Edit`
     - Most params are broadly the same as regular Qwen Image
@@ -413,7 +447,9 @@ For upscaling with SD3, the `Refiner Do Tiling` parameter is highly recommended 
         - Qwen Image Edit Plus works with up to 3 images well
         - Use phrasing like `The person in Picture 1` to refer to the content of specific input images in the prompt
         - There are a few samples of how to prompt here <https://www.alibabacloud.com/help/en/model-studio/qwen-image-edit-api>
-    - There are a couple dedicated Qwen Image Edit Lightning Loras [lightx2v/Qwen-Image-Lightning](<https://huggingface.co/lightx2v/Qwen-Image-Lightning/tree/main>)
+        - `Smart Image Prompt Resizing` parameter (top-left, under Image Prompting) will resize your input images automatically. Turn this off if you've carefully sized your images in advance.
+            - Some versions of Qwen Edit require strict sizing to work well. 2511 reportedly works fine within a range of options.
+    - There are a couple dedicated Qwen Image Edit Lightning Loras [lightx2v/Qwen-Image-Edit-2511-Lightning](<https://huggingface.co/lightx2v/Qwen-Image-Edit-2511-Lightning/tree/main>) or for older copies [lightx2v/Qwen-Image-Lightning](<https://huggingface.co/lightx2v/Qwen-Image-Lightning/tree/main>)
         - Take care to separate the Edit lora vs the base Qwen Image lora.
 
 ### Hunyuan Image 2.1
@@ -448,32 +484,35 @@ For upscaling with SD3, the `Refiner Do Tiling` parameter is highly recommended 
 
 ![img](/docs/images/models/zimage.jpg)
 
-*(Steps=9)*
+*(Steps=9, Z-Image Turbo)*
 
-- [Z-Image](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo) is supported in SwarmUI!
-    - It is a 6B scaled model designed to run extremely fast while competing at the top level of image models
-- Only the "Turbo" model is currently released, download here [Comfy-Org/z_image_turbo](<https://huggingface.co/Comfy-Org/z_image_turbo/blob/main/split_files/diffusion_models/z_image_turbo_bf16.safetensors>)
-    - Or FP8 version here (for lower VRAM): [silveroxides/Z-Image-Turbo-quants-plus](<https://huggingface.co/silveroxides/Z-Image-Turbo-quants-plus/blob/main/Z-Image-Turbo-Plateau-fp8mixed.safetensors>)
+- [Z-Image](<https://huggingface.co/Tongyi-MAI/Z-Image>) and [Z-Image Turbo](<https://huggingface.co/Tongyi-MAI/Z-Image-Turbo>) are supported in SwarmUI!
+    - It is a 6B scaled model, with both a strong base and an official turbo designed to run extremely fast while competing at the top level of image models
+    - "Edit" and "Omni" variants are still expected
+- The "Turbo" model was the first version officially released download here [Z-Image-Turbo-FP8Mixed](<https://huggingface.co/mcmonkey/swarm-models/blob/main/SwarmUI_Z-Image-Turbo-FP8Mix.safetensors>)
+    - Or the original BF16 fat version [Comfy-Org/z_image_turbo](<https://huggingface.co/Comfy-Org/z_image_turbo/blob/main/split_files/diffusion_models/z_image_turbo_bf16.safetensors>)
     - Or GGUF version here [jayn7/Z-Image-Turbo-GGUF](<https://huggingface.co/jayn7/Z-Image-Turbo-GGUF/tree/main>)
     - Save in `diffusion_models`
-    - "Base" and "Edit" variants are expected to release in the future
-- Uses the Flux.1 VAE
+- The "Base" model was released around 2 months later, download here (Pending: good fp8mixed)
+    - Or the original BF16 fat version [Comfy-Org/z_image](<https://huggingface.co/Comfy-Org/z_image/blob/main/split_files/diffusion_models/z_image_bf16.safetensors>)
+    - Save in `diffusion_models`
+- Uses the Flux.1 VAE, will be downloaded and handled automatically
     - You might prefer swapping to the [UltraFlux VAE](<https://huggingface.co/Owen777/UltraFlux-v1/blob/main/vae/diffusion_pytorch_model.safetensors>) which gets better photorealism quality (be sure to rename the file when you save it, eg `Flux/UltraFlux-vae.safetensors`)
 - **Parameters:**
     - **Prompt:** Supports general prompting in any format just fine. Speaks English and Chinese deeply, understands other languages decently well too.
     - **Sampler:** Default is fine. Some users find `Euler Ancestral` can be better on photorealism detail. Comfy examples suggests `Res MultiStep`.
     - **Scheduler:** Default is fine. Some users find `Beta` can be very slightly better.
-    - **CFG Scale:** For Turbo, `1`
-    - **Steps:** For Turbo, small numbers are fine. `4` will work, `8` is better
-        - Original repo suggests 5/9, but this appears redundant in Swarm.
-        - For particularly difficult prompts, raising Steps up to `20` may help get the full detail.
+    - **CFG Scale:** For Turbo, `1`, for base normal CFG ranges (eg 4 or 7)
+    - **Steps:** For Turbo, small numbers are fine. `4` will work, `8` is better. For Base, 20+ steps as normal.
+        - Original Turbo repo suggests 5/9, but this appears redundant in Swarm.
+        - For particularly difficult prompts, raising Steps up to `20` on Turbo or `50` on Base may help get the full detail.
     - **Resolution:** Side length `1024` is the standard, but anywhere up to `2048` is good. `512` noticeably loses some quality, above `2048` corrupts the image.
     - **Sigma Shift:** Default is `3`, raising to `6` can yield stronger coherence.
     - Here's a big ol' grid of Z-Image Turbo params: [Z-Image MegaGrid](<https://sd.mcmonkey.org/zimagegrid/#auto-loc,true,true,false,true,false,cfgscale,steps,none,none,extremecloseupt,4,1,3,1024x1024,1,euler,simple>)
 
 ### Z-Image Turbo Seed Variety Trick
 
-- There's a trick to get better seed variety in Z-Image:
+- There's a trick to get better seed variety in Z-Image Turbo: (This is less needed on Base)
     - Add an init image (Any image, doesn't matter much - the broad color bias of the image may be used, but that's about it).
     - Set Steps higher than normal (say 8 instead of 4)
     - Set Init Image Creativity to a relatively high value (eg 0.7)
@@ -500,6 +539,24 @@ For upscaling with SD3, the `Refiner Do Tiling` parameter is highly recommended 
     - **CFG Scale:** regular CFG such as `5` works.
     - **Steps:** Regular 20+ steps.
     - **Resolution:** Side length 1024.
+
+# Anima
+
+- [Anima by Circlestone Labs](<https://huggingface.co/circlestone-labs/Anima>) is a 2B anime model build on Cosmos, and it is fully supported in SwarmUI.
+    - It is designed to be tiny, lightweight, fast, but built on a strong architecture.
+    - It is the first model architecture publicly released that was sponsored by Comfy Org!
+    - It is explicitly still in Preview status, they will be training it further before it's entirely ready.
+- Download the [preview version here](<https://huggingface.co/circlestone-labs/Anima/blob/main/split_files/diffusion_models/anima-preview.safetensors>)
+    - Save in `diffusion_models`
+- It uses a tiny Qwen 3 600M ("0.6B") text encoder. This will be autodownloaded.
+- It uses the Qwen Image VAE. This will be autodownloaded.
+- **Parameters:**
+    - **Prompt:** Trained on both booru style tag prompts (`1girl, etc`) and natural language prompts. They have official specific writing guidance [here](<https://huggingface.co/circlestone-labs/Anima#prompting>)
+    - **CFG Scale:** Regular CFG scales (eg `4`) work.
+    - **Steps:** Regular 20+ steps.
+    - **Resolution:** Side length 1024 recommend, but any lower value works too. Higher values do not work well. Refiner upscale needs tiling due to corruption at high res.
+    - **Sampler:** Defaults to `ER-SDE-Solver`, but all common samplers work. They officially recommend also trying out `Euler Ancestral` or `DPM++ 2M SDE`
+    - **Scheduler:** Default is fine (`Simple`), or you can experiment at will. The model is adaptable.
 
 # Video Models
 
@@ -573,3 +630,5 @@ For upscaling with SD3, the `Refiner Do Tiling` parameter is highly recommended 
 ### OmniGen 2
 ### Ovis
 These obscure/old/bad/unpopular/etc. models have been moved to [Obscure Model Support](/docs/Obscure%20Model%20Support.md)
+
+<br><br><br><br><br><br><br><br><br><br><br><br><br><br><br>

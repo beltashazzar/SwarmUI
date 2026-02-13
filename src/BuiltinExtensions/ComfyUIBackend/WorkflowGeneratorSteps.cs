@@ -2,6 +2,7 @@
 using FreneticUtilities.FreneticExtensions;
 using Newtonsoft.Json.Linq;
 using SwarmUI.Core;
+using SwarmUI.Media;
 using SwarmUI.Text2Image;
 using SwarmUI.Utils;
 
@@ -256,7 +257,7 @@ public class WorkflowGeneratorSteps
                 {
                     Logs.Warning($"Ignore TeaCache Mode parameter because the current model is Nunchaku which does not support TeaCache. Use 'Nunchaku Cache Threshold' for a similar effect to TeaCache.");
                 }
-                else if (g.IsFlux() || g.IsFlux2())
+                else if (g.IsFlux())
                 {
                     if (teaCacheMode != "video only")
                     {
@@ -373,7 +374,15 @@ public class WorkflowGeneratorSteps
         #region Base Image
         AddStep(g =>
         {
-            if (g.UserInput.TryGet(T2IParamTypes.InitImage, out Image img))
+            // TODO: Something like this for audio models.
+            /*if (g.IsAudioModel() && g.UserInput.TryGet(T2IParamTypes.InitAudio, out AudioFile audioData))
+            {
+                string audioNode = g.CreateLoadAudioNode(audioData, "${initaudio}", true);
+                g.FinalInputAudio = [audioNode, 0];
+                g.FinalLatentAudio = g.CreateAudioVAEEncode(g.FinalAudioVae, g.FinalInputAudio, "5");
+            }
+            else*/
+            if (!g.IsAudioModel() && g.UserInput.TryGet(T2IParamTypes.InitImage, out Image img))
             {
                 string maskImageNode = null;
                 if (g.UserInput.TryGet(T2IParamTypes.MaskImage, out Image mask))
@@ -1099,7 +1108,7 @@ public class WorkflowGeneratorSteps
                             ["end_percent"] = g.UserInput.Get(controlnetParams.End, 1)
                         });
                     }
-                    else if (g.IsSD3() || g.IsFlux() || g.IsFlux2() || g.IsChroma() || g.IsQwenImage())
+                    else if (g.IsSD3() || g.IsFlux() || g.IsAnyFlux2() || g.IsChroma() || g.IsQwenImage())
                     {
                         applyNode = g.CreateNode("ControlNetApplyAdvanced", new JObject()
                         {
@@ -1345,16 +1354,51 @@ public class WorkflowGeneratorSteps
                     {
                         ["model_name"] = upscaleMethod.After("latentmodel-")
                     }, "27");
-                    g.CreateNode("HunyuanVideo15LatentUpscaleWithModel", new JObject()
+                    if (g.IsHunyuanVideo15())
                     {
-                        ["model"] = NodePath("27", 0),
-                        ["samples"] = g.FinalSamples,
-                        ["upscale_method"] = "bilinear",
-                        ["width"] = width,
-                        ["height"] = height,
-                        ["crop"] = "disabled"
-                    }, "26");
-                    g.FinalSamples = ["26", 0];
+                        g.CreateNode("HunyuanVideo15LatentUpscaleWithModel", new JObject()
+                        {
+                            ["model"] = NodePath("27", 0),
+                            ["samples"] = g.FinalSamples,
+                            ["upscale_method"] = "bilinear",
+                            ["width"] = width,
+                            ["height"] = height,
+                            ["crop"] = "disabled"
+                        }, "26");
+                        g.FinalSamples = ["26", 0];
+                    }
+                    else if (g.IsLTXV2())
+                    {
+                        string separated = g.CreateNode("LTXVSeparateAVLatent", new JObject()
+                        {
+                            ["av_latent"] = g.FinalSamples
+                        });
+                        g.FinalLatentAudio = [separated, 1];
+                        string cropGuides = g.CreateNode("LTXVCropGuides", new JObject()
+                        {
+                            ["positive"] = prompt,
+                            ["negative"] = negPrompt,
+                            ["latent"] = NodePath(separated, 0)
+                        });
+                        prompt = [cropGuides, 0];
+                        negPrompt = [cropGuides, 1];
+                        g.CreateNode("LTXVLatentUpsampler", new JObject()
+                        {
+                            ["vae"] = g.FinalVae,
+                            ["samples"] = NodePath(cropGuides, 2),
+                            ["upscale_model"] = NodePath("27", 0)
+                        }, "26");
+                        string reconcat = g.CreateNode("LTXVConcatAVLatent", new JObject()
+                        {
+                            ["video_latent"] = NodePath("26", 0),
+                            ["audio_latent"] = g.FinalLatentAudio
+                        });
+                        g.FinalSamples = [reconcat, 0];
+                    }
+                    else
+                    {
+                        throw new SwarmUserErrorException($"Cannot latent-upscale for {g.CurrentCompatClass()}");
+                    }
                 }
                 JArray model = g.FinalModel;
                 if (g.UserInput.TryGet(ComfyUIBackendExtension.RefinerHyperTile, out int tileSize))
@@ -1392,7 +1436,7 @@ public class WorkflowGeneratorSteps
         }, 1);
         #endregion
         #region Segmentation Processing
-        AddStep(g =>
+        void RunSegmentationProcessing(WorkflowGenerator g, bool isBeforeRefiner)
         {
             PromptRegion.Part[] parts = [.. new PromptRegion(g.UserInput.Get(T2IParamTypes.Prompt, "")).Parts.Where(p => p.Type == PromptRegion.PartType.Segment)];
             if (parts.Any())
@@ -1422,6 +1466,10 @@ public class WorkflowGeneratorSteps
                     PromptRegion.Part part = parts[i];
                     string[] segmentSections = part.DataText.Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
                     string segmentNode = null;
+                    if (segmentSections.Length == 0)
+                    {
+                        segmentSections = [""];
+                    }
                     foreach (string dataText in segmentSections)
                     {
                         string newSegmentNode = null;
@@ -1542,7 +1590,39 @@ public class WorkflowGeneratorSteps
                     g.FinalImageOut = g.RecompositeCropped(g.MaskShrunkInfo.BoundsNode, [g.MaskShrunkInfo.CroppedMask, 0], g.FinalImageOut, [decoded, 0]);
                     g.MaskShrunkInfo = new(null, null, null, null);
                 }
+                if (isBeforeRefiner)
+                {
+                    string encoded = g.CreateVAEEncode(g.FinalVae, g.FinalImageOut);
+                    g.FinalSamples = [encoded, 0];
+                    g.FinalImageOut = null;
+                }
             }
+        }
+        AddStep(g =>
+        {
+            if (g.UserInput.Get(T2IParamTypes.SegmentApplyAfter, "Refiner") != "Base")
+            {
+                return;
+            }
+            PromptRegion.Part[] parts = [.. new PromptRegion(g.UserInput.Get(T2IParamTypes.Prompt, "")).Parts.Where(p => p.Type == PromptRegion.PartType.Segment)];
+            if (!parts.Any())
+            {
+                return;
+            }
+            if (g.FinalImageOut is null)
+            {
+                string decodeNode = g.CreateVAEDecode(g.FinalVae, g.FinalSamples);
+                g.FinalImageOut = [decodeNode, 0];
+            }
+            RunSegmentationProcessing(g, isBeforeRefiner: true);
+        }, -4.5);
+        AddStep(g =>
+        {
+            if (g.UserInput.Get(T2IParamTypes.SegmentApplyAfter, "Refiner") != "Refiner")
+            {
+                return;
+            }
+            RunSegmentationProcessing(g, isBeforeRefiner: false);
         }, 5);
         #endregion
         #region SaveImage
@@ -1645,7 +1725,15 @@ public class WorkflowGeneratorSteps
                 }
                 if (nodeId is not null)
                 {
-                    g.CreateImageSaveNode(g.FinalImageOut, nodeId);
+                    // TODO: use CreateSaveNode and NodeOutData
+                    if (g.IsAudioModel())
+                    {
+                        g.CreateAudioSaveNode(g.FinalAudioOut, nodeId);
+                    }
+                    else
+                    {
+                        g.CreateImageSaveNode(g.FinalImageOut, nodeId);
+                    }
                 }
             }
         }, 10);
@@ -1659,7 +1747,7 @@ public class WorkflowGeneratorSteps
                 int? videoFps = g.UserInput.TryGet(T2IParamTypes.VideoFPS, out int fpsRaw) ? fpsRaw : null;
                 double? videoCfg = g.UserInput.GetNullable(T2IParamTypes.CFGScale, T2IParamInput.SectionID_Video, false) ?? g.UserInput.GetNullable(T2IParamTypes.VideoCFG, T2IParamInput.SectionID_Video);
                 int steps = g.UserInput.GetNullable(T2IParamTypes.Steps, T2IParamInput.SectionID_Video, false) ?? g.UserInput.Get(T2IParamTypes.VideoSteps, 20, sectionId: T2IParamInput.SectionID_Video);
-                string format = g.UserInput.Get(T2IParamTypes.VideoFormat, "webp").ToLowerFast();
+                string format = g.UserInput.Get(T2IParamTypes.VideoFormat, "h264-mp4").ToLowerFast();
                 string resFormat = g.UserInput.Get(T2IParamTypes.VideoResolution, "Model Preferred");
                 long seed = g.UserInput.Get(T2IParamTypes.Seed) + 42;
                 string prompt = g.UserInput.Get(T2IParamTypes.Prompt, "");
@@ -1701,7 +1789,7 @@ public class WorkflowGeneratorSteps
                         height = (int)Math.Round(height * scale);
                     }
                 }
-                void altLatent(WorkflowGenerator.ImageToVideoGenInfo genInfo)
+                void altLatent(ImageToVideoGenInfo genInfo)
                 {
                     if (g.UserInput.TryGet(T2IParamTypes.Video2VideoCreativity, out double v2vCreativity))
                     {
@@ -1720,7 +1808,7 @@ public class WorkflowGeneratorSteps
                         genInfo.Latent = [reEncode, 0];
                     }
                 }
-                WorkflowGenerator.ImageToVideoGenInfo genInfo = new()
+                ImageToVideoGenInfo genInfo = new()
                 {
                     Generator = g,
                     VideoModel = vidModel,
@@ -1895,9 +1983,25 @@ public class WorkflowGeneratorSteps
                 JArray source = data["inputs"]["samples"] as JArray;
                 string sourceNode = $"{source[0]}";
                 JObject actualNode = g.Workflow[sourceNode] as JObject;
-                if ($"{actualNode["class_type"]}" == "VAEEncode")
+                JArray myVae = data["inputs"]["vae"] as JArray;
+                if ($"{actualNode["class_type"]}" == "LTXVSeparateAVLatent")
                 {
-                    JArray myVae = data["inputs"]["vae"] as JArray;
+                    JArray subSource = actualNode["inputs"]["av_latent"] as JArray;
+                    string subSourceNode = $"{subSource[0]}";
+                    JObject actualSubNode = g.Workflow[subSourceNode] as JObject;
+                    if ($"{actualSubNode["class_type"]}" == "VAEEncode")
+                    {
+                        JArray srcVae = actualSubNode["inputs"]["vae"] as JArray;
+                        if ($"{myVae[0]}" == $"{srcVae[0]}" && $"{myVae[1]}" == $"{srcVae[1]}")
+                        {
+                            JArray srcImage = actualSubNode["inputs"]["pixels"] as JArray;
+                            g.ReplaceNodeConnection([id, 0], srcImage);
+                            g.Workflow.Remove(id);
+                        }
+                    }
+                }
+                else if ($"{actualNode["class_type"]}" == "VAEEncode")
+                {
                     JArray srcVae = actualNode["inputs"]["vae"] as JArray;
                     if ($"{myVae[0]}" == $"{srcVae[0]}" && $"{myVae[1]}" == $"{srcVae[1]}")
                     {
@@ -1909,6 +2013,8 @@ public class WorkflowGeneratorSteps
             }
             g.RunOnNodesOfClass("VAEDecode", fixDecode);
             g.RunOnNodesOfClass("VAEDecodeTiled", fixDecode);
+            g.RemoveClassIfUnused("LTXVAudioVAEDecode");
+            g.RemoveClassIfUnused("LTXVSeparateAVLatent");
             g.RemoveClassIfUnused("VAEEncode");
             g.RemoveClassIfUnused("LTXVConditioning");
             g.RemoveClassIfUnused("CLIPTextEncode");

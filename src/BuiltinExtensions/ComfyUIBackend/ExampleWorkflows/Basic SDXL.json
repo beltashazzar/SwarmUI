@@ -345,7 +345,7 @@
           },
           "widgets_values": [
             "SDXL Checkpoint Model",
-            "OfficialStableDiffusion\\sd_xl_base_1.0.safetensors",
+            "OfficialStableDiffusion/sd_xl_base_1.0.safetensors",
             "",
             0,
             false,
@@ -623,7 +623,7 @@
       "17": {
         "inputs": {
           "title": "SDXL Checkpoint Model",
-          "value": "${sdxlcheckpointmodel:OfficialStableDiffusion\\sd_xl_base_1.0.safetensors}",
+          "value": "${sdxlcheckpointmodel:OfficialStableDiffusion/sd_xl_base_1.0.safetensors}",
           "description": "",
           "order_priority": 0,
           "is_advanced": false,

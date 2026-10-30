@@ -8,7 +8,9 @@
 
 cd /SwarmUI
 
-# Docker defaults HOME to '/', same workaround as docker-standard-inner.sh.
-export HOME=/SwarmUI/dlbackend/linuxhome
+# Docker defaults HOME to '/'. Not dlbackend/linuxhome as docker-standard-inner.sh uses: that
+# lives on the dlbackend volume, which only the (disabled) self-start ComfyUI backend needs, and
+# nothing in HOME has to outlive the container -- the old caches there were SDK/pip/torch ones.
+export HOME=/home/swarmui
 
 exec dotnet src/bin/live_release/SwarmUI.dll "$@" --launch_mode none --host 0.0.0.0

@@ -71,7 +71,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends git ffmpeg libgomp1 \
  && rm -rf /var/lib/apt/lists/* /tmp/bookworm-security.InRelease \
  && git config --system --add safe.directory '*' \
- && useradd -u $UID swarmui
+ && useradd -m -u $UID swarmui
 
 COPY --from=build --chown=$UID:$UID /SwarmUI /SwarmUI
 

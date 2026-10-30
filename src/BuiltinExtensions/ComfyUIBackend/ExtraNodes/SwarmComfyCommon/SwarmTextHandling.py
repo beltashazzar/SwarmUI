@@ -1,4 +1,4 @@
-import torch, comfy
+import torch, comfy, node_helpers
 from nodes import MAX_RESOLUTION
 
 
@@ -19,6 +19,8 @@ PROMPT_TEMPLATE_ENCODE_VIDEO_I2V = (
 # LLaMA template for Qwen Image Edit Plus.
 PROMPT_TEMPLATE_QWEN_IMAGE_EDIT_PLUS = "<|im_start|>system\nDescribe the key features of the input image (color, shape, size, texture, objects, background), then explain how the user's text instruction should alter or modify the image. Generate a new image that meets the user's requirements while maintaining consistency with the original input where appropriate.<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
 
+KREA2_TEMPLATE = "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
+
 class SwarmClipTextEncodeAdvanced:
     @classmethod
     def INPUT_TYPES(s):
@@ -37,6 +39,7 @@ class SwarmClipTextEncodeAdvanced:
                 "llama_template": ("STRING", {"default": "", "multiline": True, "tooltip": "Template for the LLaMA model, if applicable."}),
                 "clip_vision_output": ("CLIP_VISION_OUTPUT", {"default": None, "tooltip": "Optional CLIP Vision Output to use for the LLaMA model, if applicable."}),
                 "images": ("IMAGE", {"default": None, "tooltip": "Optional images to use for a text-vision model, if applicable."}),
+                "minimax_refs": ("MiniMaxReferences", {"default": None, "tooltip": "Optional MiniMax H3 references (images, videos, audio)."}),
             }
         }
 
@@ -45,27 +48,48 @@ class SwarmClipTextEncodeAdvanced:
     FUNCTION = "encode"
     DESCRIPTION = "Acts like the regular CLIPTextEncode, but supports more advanced special features like '<break>', '[from:to:when]', '[alter|nate]', ..."
 
-    def encode(self, clip, steps: int, prompt: str, width: int, height: int, target_width: int, target_height: int, guidance: float = -1, llama_template = None, clip_vision_output = None, images = None):
-        image_prompt = ""
+    def encode(self, clip, steps: int, prompt: str, width: int, height: int, target_width: int, target_height: int, guidance: float = -1, llama_template = None, clip_vision_output = None, images = None, minimax_refs = None):
+        append_images = False
+        prepend_images = False
+        fix_images = True
         if llama_template == "hunyuan_image":
             llama_template = PROMPT_TEMPLATE_ENCODE_VIDEO_I2V
+            fix_images = False
+        elif llama_template == "krea2":
+            llama_template = KREA2_TEMPLATE
+            append_images = True
         elif llama_template == "qwen_image_edit_plus":
             llama_template = PROMPT_TEMPLATE_QWEN_IMAGE_EDIT_PLUS
-            if images is not None:
-                if len(images.shape) == 3:
-                    images = [images]
-                else:
-                    images = [i.unsqueeze(0) for i in images]
-                for i, image in enumerate(images):
-                    image_prompt += f"Picture {i + 1}: <|vision_start|><|image_pad|><|vision_end|>"
+            append_images = True
+            prepend_images = True
+        if images is not None and fix_images:
+            if len(images.shape) == 3:
+                images = [images]
+            else:
+                images = [i.unsqueeze(0) for i in images]
 
         def tokenize(text: str):
+            nonlocal images
+            extra = {}
+            if minimax_refs is not None:
+                extra["minimax_ref_items"] = minimax_refs["ref_items"]
             if clip_vision_output is not None:
-                return clip.tokenize(text, llama_template=llama_template, image_embeds=clip_vision_output.mm_projected)
+                return clip.tokenize(text, llama_template=llama_template if llama_template else None, image_embeds=clip_vision_output.mm_projected, **extra)
             elif images is not None:
-                return clip.tokenize(image_prompt + text, llama_template=llama_template, images=images)
+                if append_images:
+                    image_prompt = ""
+                    for i, image in enumerate(images):
+                        if f"input_image_{i + 1}" in text:
+                            text = text.replace(f"input_image_{i + 1}", f"<|vision_start|><|image_pad|><|vision_end|>", 1)
+                        else:
+                            image_prompt += f"Picture {i + 1}: <|vision_start|><|image_pad|><|vision_end|>"
+                    if prepend_images:
+                        text = image_prompt + text
+                    else:
+                        text = text + image_prompt
+                return clip.tokenize(text, llama_template=llama_template if llama_template else None, images=images, **extra)
             else:
-                return clip.tokenize(text)
+                return clip.tokenize(text, **extra)
 
         encoding_cache = {}
 
@@ -182,23 +206,27 @@ class SwarmClipTextEncodeAdvanced:
         get_chunks(prompt)
 
         if not any[0]:
-            return (text_to_cond(prompt, 0, 1), )
-
-        conds_out = []
-        last_text = ""
-        start_perc = 0
-        for i in range(steps):
-            perc = i / steps
-            text = ""
-            for chunk in chunks:
-                if i in chunk['applies_to']:
-                    text += chunk['text']
-            if text != last_text or i == 0:
-                if i != 0:
-                    conds_out.extend(text_to_cond(last_text, start_perc - 0.001, perc + 0.001))
-                last_text = text
-                start_perc = perc
-        conds_out.extend(text_to_cond(last_text, start_perc - 0.001, 1))
+            conds_out = text_to_cond(prompt, 0, 1)
+        else:
+            conds_out = []
+            last_text = ""
+            start_perc = 0
+            for i in range(steps):
+                perc = i / steps
+                text = ""
+                for chunk in chunks:
+                    if i in chunk['applies_to']:
+                        text += chunk['text']
+                if text != last_text or i == 0:
+                    if i != 0:
+                        conds_out.extend(text_to_cond(last_text, start_perc - 0.001, perc + 0.001))
+                    last_text = text
+                    start_perc = perc
+            conds_out.extend(text_to_cond(last_text, start_perc - 0.001, 1))
+        if minimax_refs is not None:
+            ref_blocks = minimax_refs["ref_blocks"]
+            if ref_blocks:
+                conds_out = node_helpers.conditioning_set_values(conds_out, {"minimax_refs": ref_blocks})
         return (conds_out, )
 
 

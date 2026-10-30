@@ -1,4 +1,4 @@
-﻿using FreneticUtilities.FreneticExtensions;
+using FreneticUtilities.FreneticExtensions;
 using FreneticUtilities.FreneticToolkit;
 using Microsoft.AspNetCore.Html;
 using Microsoft.AspNetCore.Http;
@@ -326,5 +326,12 @@ public static class WebUtil
             Logs.Verbose($"Fatal error trying to parse swarm_token: {ex}");
             return null;
         }
+    }
+
+    public static HashSet<string> FossLicenses = ["mit", "apache-2.0"];
+
+    public static bool LicenseIsFoss(string license)
+    {
+        return FossLicenses.Contains(license.ToLowerFast());
     }
 }

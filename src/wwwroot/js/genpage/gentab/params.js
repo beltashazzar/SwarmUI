@@ -25,6 +25,18 @@ function setGroupAdvancedOverride(groupId, enable) {
     }
 }
 
+/** Returns the resolution rounding precision for the current model compat class (16 for most models, some may be higher or lower). */
+function getResolutionPrecision() {
+    let compatId = currentModelHelper.curCompatClass;
+    if (compatId) {
+        let compat = modelsHelpers.compatClasses[compatId];
+        if (compat?.resolutionPrecision) {
+            return compat.resolutionPrecision;
+        }
+    }
+    return 16;
+}
+
 class AspectRatio {
     constructor(id, width, height, altLogic = null) {
         this.id = id;
@@ -35,19 +47,20 @@ class AspectRatio {
     }
 
     read(inWidth, inHeight, doAltLogic = true) {
-        if (this.altLogic && doAltLogic) {
+        let precision = getResolutionPrecision();
+        if (this.altLogic && doAltLogic && precision == 16) {
             let [newWidth, newHeight] = this.altLogic(inWidth, inHeight);
             if (newWidth && newHeight) {
                 return [newWidth, newHeight];
             }
         }
         if (inWidth != inHeight) {
-            inWidth = roundTo(Math.sqrt(inWidth * inHeight), 16);
+            inWidth = roundTo(Math.sqrt(inWidth * inHeight), precision);
             inHeight = inWidth;
         }
         // NOTE: This math must match T2IParamInput GetImageWidth
-        let width = roundTo(this.width * (inWidth <= 0 ? 512 : inWidth) / 512, 16);
-        let height = roundTo(this.height * (inHeight <= 0 ? 512 : inHeight) / 512, 16);
+        let width = roundTo(this.width * (inWidth <= 0 ? 512 : inWidth) / 512, precision);
+        let height = roundTo(this.height * (inHeight <= 0 ? 512 : inHeight) / 512, precision);
         return [width, height];
     }
 }
@@ -92,8 +105,81 @@ let aspectRatios = [
     new AspectRatio("9:21", 320, 768)
 ];
 
+/** Synchronizes video duration controls in frames and seconds using the applicable Video FPS input. */
+function enableVideoFramesInput(id, prefix) {
+    let frameInput = getRequiredElementById(id);
+    let secondsInput = getRequiredElementById(`${id}_seconds`);
+    let secondsRange = getRequiredElementById(`${id}_rangeslider`);
+    let fpsInput = document.getElementById(`${prefix}videofps`);
+    let fpsToggle = document.getElementById(`${prefix}videofps_toggle`);
+    let noDup = false;
+    enableSliderForBox(findParentOfClass(frameInput, 'auto-slider-box'), secondsInput);
+    function updateSecondsRangeStep(event) {
+        secondsRange.step = event.shiftKey ? 1 / getFPS() : 0.5;
+    }
+    secondsRange.addEventListener('pointerdown', updateSecondsRangeStep);
+    secondsRange.addEventListener('keydown', updateSecondsRangeStep);
+    secondsRange.addEventListener('keyup', updateSecondsRangeStep);
+    secondsRange.addEventListener('blur', () => {
+        secondsRange.step = 0.5;
+    });
+    function getFPS() {
+        if (!fpsInput || (fpsToggle && !fpsToggle.checked)) {
+            return 24;
+        }
+        let fps = parseFloat(fpsInput.value);
+        return Number.isFinite(fps) && fps > 0 ? fps : 24;
+    }
+    function updateFromFrames() {
+        if (noDup) {
+            return;
+        }
+        noDup = true;
+        let frames = parseInt(frameInput.value);
+        if (!Number.isFinite(frames)) {
+            frames = 0;
+        }
+        let seconds = formatNumberClean(frames / getFPS(), 2);
+        secondsInput.value = seconds;
+        secondsInput.dataset.old_value = seconds;
+        secondsRange.value = seconds;
+        updateRangeStyle(secondsRange);
+        autoNumberWidth(frameInput);
+        autoNumberWidth(secondsInput);
+        noDup = false;
+    }
+    function updateFromSeconds() {
+        if (noDup) {
+            return;
+        }
+        noDup = true;
+        let seconds = parseFloat(secondsInput.value);
+        if (!Number.isFinite(seconds)) {
+            return;
+        }
+        secondsInput.value = formatNumberClean(seconds, 2);
+        let frames = Math.round(seconds * getFPS());
+        frames = Math.max(parseInt(frameInput.min), Math.min(parseInt(frameInput.max), frames));
+        frameInput.value = frames;
+        triggerChangeFor(frameInput);
+        autoNumberWidth(frameInput);
+        autoNumberWidth(secondsInput);
+        noDup = false;
+    }
+    frameInput.addEventListener('input', updateFromFrames);
+    secondsInput.addEventListener('input', updateFromSeconds);
+    secondsRange.addEventListener('input', updateFromSeconds);
+    if (fpsInput) {
+        fpsInput.addEventListener('input', updateFromFrames);
+        fpsInput.addEventListener('change', updateFromFrames);
+    }
+    if (fpsToggle) {
+        fpsToggle.addEventListener('change', updateFromFrames);
+    }
+    updateFromFrames();
+}
 
-function getHtmlForParam(param, prefix) {
+function getHtmlForParam(param, prefix, isPreset = false) {
     try {
         let example = param.examples ? `<br><span class="translate">Examples</span>: <code>${param.examples.map(escapeHtmlNoBr).join(`</code>,&emsp;<code>`)}</code>` : '';
         let pop = param.no_popover ? '' : `<div class="sui-popover sui-info-popover" id="popover_${prefix}${param.id}"><b class="translate">${escapeHtmlNoBr(param.name)}</b> (${param.type}):<br><span class="translate slight-left-margin-block">${safeHtmlOnly(param.description)}</span>${example}</div>`;
@@ -122,6 +208,9 @@ function getHtmlForParam(param, prefix) {
                     case 'big':
                         return {html: makeNumberInput(param.feature_flag, `${prefix}${param.id}`, param.id, param.name, param.description, param.default, min, max, step, 'big', param.toggleable, !param.no_popover) + pop,
                         runnable: () => autoNumberWidth(getRequiredElementById(`${prefix}${param.id}`))};
+                    case 'video_frames':
+                        return {html: makeVideoFramesInput(param.feature_flag, `${prefix}${param.id}`, param.id, param.name, param.description, param.default, min, max, step, param.toggleable, !param.no_popover) + pop,
+                            runnable: () => enableVideoFramesInput(`${prefix}${param.id}`, prefix)};
                     case 'seed':
                         return {html: makeNumberInput(param.feature_flag, `${prefix}${param.id}`, param.id, param.name, param.description, param.default, min, max, step, 'seed', param.toggleable, !param.no_popover) + pop};
                     case 'slider':
@@ -162,13 +251,18 @@ function getHtmlForParam(param, prefix) {
                 return {html: makeDropdownInput(param.feature_flag, `${prefix}${param.id}`, param.id, param.name, param.description, modelList, param.default, param.toggleable, !param.no_popover, modelAltNames, false) + pop,
                     runnable: () => autoSelectWidth(getRequiredElementById(`${prefix}${param.id}`))};
             case 'image':
-                return {html: makeImageInput(param.feature_flag, `${prefix}${param.id}`, param.id, param.name, param.description, param.toggleable, !param.no_popover) + pop};
+                return {html: makeImageInput(param.feature_flag, `${prefix}${param.id}`, param.id, param.name, param.description, param.toggleable, !param.no_popover, !isPreset) + pop};
             case 'audio':
-                return {html: makeAudioInput(param.feature_flag, `${prefix}${param.id}`, param.id, param.name, param.description, param.toggleable, !param.no_popover) + pop};
+                return {html: makeAudioInput(param.feature_flag, `${prefix}${param.id}`, param.id, param.name, param.description, param.toggleable, !param.no_popover, !isPreset) + pop};
             case 'video':
-                return {html: makeVideoInput(param.feature_flag, `${prefix}${param.id}`, param.id, param.name, param.description, param.toggleable, !param.no_popover) + pop};
+                return {html: makeVideoInput(param.feature_flag, `${prefix}${param.id}`, param.id, param.name, param.description, param.toggleable, !param.no_popover, !isPreset) + pop};
+            // TODO: Proper impl for list types
             case 'image_list':
-                return {html: makeImageInput(param.feature_flag, `${prefix}${param.id}`, param.id, param.name, param.description, param.toggleable, !param.no_popover) + pop};
+                return {html: makeImageInput(param.feature_flag, `${prefix}${param.id}`, param.id, param.name, param.description, param.toggleable, !param.no_popover, !isPreset) + pop};
+            case 'audio_list':
+                return {html: makeAudioInput(param.feature_flag, `${prefix}${param.id}`, param.id, param.name, param.description, param.toggleable, !param.no_popover, !isPreset) + pop};
+            case 'video_list':
+                return {html: makeVideoInput(param.feature_flag, `${prefix}${param.id}`, param.id, param.name, param.description, param.toggleable, !param.no_popover, !isPreset) + pop};
         }
         console.log(`Cannot generate input for param ${param.id} of type ${param.type} - unknown type`);
         return null;
@@ -268,6 +362,25 @@ function getParamMemoryDays() {
     return parseFloat(getUserSetting('parametermemorydurationhours', '6')) / 24;
 }
 
+let readyToPersistPromptArea = false;
+function persistPromptMediaParams() {
+    if (!readyToPersistPromptArea) {
+        return;
+    }
+    let area = document.getElementById('alt_prompt_image_area');
+    let mediaTypes = { IMG: 'promptimages', AUDIO: 'promptaudios', VIDEO: 'promptvideos' };
+    for (let tag of Object.keys(mediaTypes)) {
+        let paramId = mediaTypes[tag];
+        let paths = [...area.querySelectorAll('.alt-prompt-image')].filter(c => c.tagName == tag).map(item => item.dataset.filedata).filter(isValidMediaPath);
+        if (!paths.length) {
+            deleteCookie(`lastparam_input_${paramId}`);
+        }
+        else {
+            setCookie(`lastparam_input_${paramId}`, paths.join('|'), getParamMemoryDays());
+        }
+    }
+}
+
 /** Re-persist stored parameter values - to avoid some disappearing and others staying */
 function autoRepersistParams() {
     let hrs = getUserSetting('parametermemorydurationhours', 'none');
@@ -304,6 +417,8 @@ function autoRepersistParams() {
 }
 
 function genInputs(delay_final = false) {
+    readyToPersistPromptArea = false;
+    clearPromptImages();
     let runnables = [];
     let groupsClose = [];
     let groupsEnable = [];
@@ -379,7 +494,7 @@ function genInputs(delay_final = false) {
                 if (isPrompt(param) ? isMain : true) {
                     let presetParam = JSON.parse(JSON.stringify(param));
                     presetParam.toggleable = true;
-                    let presetData = getHtmlForParam(presetParam, "preset_input_");
+                    let presetData = getHtmlForParam(presetParam, "preset_input_", true);
                     presetHtml += presetData.html;
                     if (presetData.runnable) {
                         runnables.push(presetData.runnable);
@@ -710,9 +825,7 @@ function genInputs(delay_final = false) {
             let cookie = getCookie(`lastparam_input_${param.id}`);
             if (cookie) {
                 shouldApplyDefault = false;
-                if (param.type != "image") {
-                    setDirectParamValue(param, cookie);
-                }
+                setDirectParamValue(param, cookie);
             }
             let container = findParentOfClass(elem, 'auto-input');
             let nameBlock = container.querySelector('.auto-input-name');
@@ -752,20 +865,28 @@ function genInputs(delay_final = false) {
                         let valSet = [...elem.selectedOptions].map(option => option.value);
                         val = valSet.join(',');
                     }
-                    else if (param.type != "image") {
+                    else if (param.id == 'promptimages' || param.id == 'promptaudios' || param.id == 'promptvideos') {
+                        val = null;
+                    }
+                    else if (param.type == "image" || param.type == "audio" || param.type == "video") {
+                        val = getInputVal(elem);
+                        if (!isValidMediaPath(val)) {
+                            val = null;
+                        }
+                    }
+                    // TODO: else if (param.type == "image_list" || param.type == "audio_list" || param.type == "video_list")
+                    else {
                         val = elem.value;
                     }
                     return val;
                 }
                 elem.addEventListener('change', () => {
                     let val = getParamValue(param, elem);
-                    if (val !== null) {
-                        if (val == param.default) {
-                            deleteCookie(`lastparam_input_${param.id}`);
-                        }
-                        else {
-                            setCookie(`lastparam_input_${param.id}`, val, getParamMemoryDays());
-                        }
+                    if (val === null || val == param.default) {
+                        deleteCookie(`lastparam_input_${param.id}`);
+                    }
+                    else {
+                        setCookie(`lastparam_input_${param.id}`, val, getParamMemoryDays());
                     }
                 });
                 if (param.toggleable) {
@@ -801,6 +922,32 @@ function genInputs(delay_final = false) {
         modelInput.addEventListener('change', () => {
             forceSetDropdownValue('current_model', modelInput.value);
         });
+        let modelChangeInputs = new Set();
+        for (let param of gen_param_types) {
+            if (param.type != 'model' || param.subtype != 'Stable-Diffusion' || param.id == 'model') {
+                continue;
+            }
+            modelChangeInputs.add(document.getElementById(`input_${param.id}`));
+            if (param.toggleable) {
+                modelChangeInputs.add(document.getElementById(`input_${param.id}_toggle`));
+            }
+            let group = param.original_group || param.group;
+            while (group) {
+                if (group.toggles) {
+                    modelChangeInputs.add(document.getElementById(`input_group_content_${group.id}_toggle`));
+                }
+                group = group.parent;
+            }
+        }
+        for (let input of modelChangeInputs) {
+            if (input) {
+                input.addEventListener('change', () => {
+                    for (let browser of subModelBrowsers) {
+                        browser.browser.lightRefresh();
+                    }
+                });
+            }
+        }
         let vaeInput = document.getElementById('input_vae');
         if (vaeInput) {
             vaeInput.addEventListener('change', () => {
@@ -814,7 +961,7 @@ function genInputs(delay_final = false) {
         let controlnetGroup = document.getElementById('input_group_content_controlnet');
         if (controlnetGroup) {
             let firstGroup = controlnetGroup.querySelector('.input-group');
-            let buttonDiv = createDiv(`controlnet_button_preview`, null, `<button class="basic-button" onclick="controlnetShowPreview()">Preview</button>`);
+            let buttonDiv = createDiv(`controlnet_button_preview`, 'wide_block', `<button class="basic-button" onclick="controlnetShowPreview()">Preview</button> <button id="controlnet_button_save_preview" class="basic-button" onclick="controlnetSavePreviewToServer()" style="display:none;">Save to Server</button>`);
             if (firstGroup) {
                 controlnetGroup.insertBefore(buttonDiv, firstGroup);
             }
@@ -844,6 +991,10 @@ function genInputs(delay_final = false) {
         if (imageEditor.active) {
             imageEditor.doParamHides();
         }
+        if (currentPresets.length > 0) {
+            updatePresetList();
+        }
+        readyToPersistPromptArea = true;
     };
     if (delay_final) {
         setTimeout(() => {
@@ -872,54 +1023,84 @@ function toggle_advanced_checkbox_manual() {
     toggle_advanced();
 }
 
+/** Adds prompt image, audio, and video data and metadata from an added-image-area to a generation input. */
+function addPromptMediaToInput(input, addedImageArea, extraMetadata) {
+    let mediaTypes = { IMG: 'promptimages', AUDIO: 'promptaudios', VIDEO: 'promptvideos' };
+    for (let tagName in mediaTypes) {
+        let media = [...addedImageArea.querySelectorAll('.alt-prompt-image')].filter(c => c.tagName == tagName);
+        if (media.length > 0) {
+            let paramId = mediaTypes[tagName];
+            input[paramId] = media.map(item => item.dataset.filedata);
+            let filenames = media.map(item => item.dataset.filename || null);
+            let resolutions = media.map(item => item.dataset.resolution || null);
+            let durations = media.map(item => item.dataset.duration || null);
+            if (filenames.some(value => value)) {
+                extraMetadata[`${paramId}_filename`] = filenames;
+            }
+            if (resolutions.some(value => value)) {
+                extraMetadata[`${paramId}_resolution`] = resolutions;
+            }
+            if (durations.some(value => value)) {
+                extraMetadata[`${paramId}_duration`] = durations;
+            }
+        }
+    }
+}
+
+/** Returns whether a parameter and all of its containing groups are enabled. */
+function isParamEnabled(param) {
+    if (param.toggleable && !getRequiredElementById(`input_${param.id}_toggle`).checked) {
+        return false;
+    }
+    if (param.feature_missing) {
+        return false;
+    }
+    let group = param.original_group || param.group;
+    while (group) {
+        if (group.toggles && !document.getElementById(`input_group_content_${group.id}_toggle`)?.checked) {
+            return false;
+        }
+        group = group.parent;
+    }
+    let elem = getRequiredElementById(`input_${param.id}`);
+    let parent = findParentOfClass(elem, 'auto-input');
+    return !parent || parent.dataset.disabled != 'true';
+}
+
 function getGenInput(input_overrides = {}, input_preoverrides = {}) {
     let input = JSON.parse(JSON.stringify(input_preoverrides));
     let extraMetadata = {};
-    paramLoop: for (let type of gen_param_types) {
-        if (type.toggleable && !getRequiredElementById(`input_${type.id}_toggle`).checked) {
+    for (let type of gen_param_types) {
+        if (!isParamEnabled(type)) {
             continue;
-        }
-        if (type.feature_missing) {
-            continue;
-        }
-        let group = type.original_group || type.group;
-        while (group) {
-            if (group.toggles && !getRequiredElementById(`input_group_content_${group.id}_toggle`).checked) {
-                continue paramLoop;
-            }
-            group = group.parent;
         }
         let elem = getRequiredElementById(`input_${type.id}`);
-        let parent = findParentOfClass(elem, 'auto-input');
-        if (parent && parent.dataset.disabled == 'true') {
-            continue;
-        }
         let val = getInputVal(elem, true);
         if (val != null) {
             input[type.id] = val;
-        }
-        if (type.type == 'image') {
-            extraMetadata[`${type.id}_filename`] = elem.dataset.filename;
-            extraMetadata[`${type.id}_resolution`] = elem.dataset.resolution;
-        }
-        else if (type.type == 'video') {
-            extraMetadata[`${type.id}_filename`] = elem.dataset.filename;
-            extraMetadata[`${type.id}_resolution`] = elem.dataset.resolution;
-            extraMetadata[`${type.id}_duration`] = elem.dataset.duration;
-        }
-        else if (type.type == 'audio') {
-            extraMetadata[`${type.id}_filename`] = elem.dataset.filename;
-            extraMetadata[`${type.id}_duration`] = elem.dataset.duration;
+            if (type.type == 'image') {
+                extraMetadata[`${type.id}_filename`] = elem.dataset.filename;
+                extraMetadata[`${type.id}_resolution`] = elem.dataset.resolution;
+                if (elem.dataset.duration) {
+                    extraMetadata[`${type.id}_duration`] = elem.dataset.duration;
+                }
+            }
+            else if (type.type == 'video') {
+                extraMetadata[`${type.id}_filename`] = elem.dataset.filename;
+                extraMetadata[`${type.id}_resolution`] = elem.dataset.resolution;
+                extraMetadata[`${type.id}_duration`] = elem.dataset.duration;
+            }
+            else if (type.type == 'audio') {
+                extraMetadata[`${type.id}_filename`] = elem.dataset.filename;
+                extraMetadata[`${type.id}_duration`] = elem.dataset.duration;
+            }
         }
         if (type.id == 'prompt') {
             let container = findParentOfClass(elem, 'auto-input');
             let addedImageArea = container.querySelector('.added-image-area');
             if (addedImageArea) {
                 addedImageArea.style.display = '';
-                let imgs = [...addedImageArea.querySelectorAll('.alt-prompt-image')].filter(c => c.tagName == "IMG");
-                if (imgs.length > 0) {
-                    input["promptimages"] = imgs.map(img => img.dataset.filedata);
-                }
+                addPromptMediaToInput(input, addedImageArea, extraMetadata);
             }
         }
     }
@@ -940,10 +1121,7 @@ function getGenInput(input_overrides = {}, input_preoverrides = {}) {
         delete input['vae'];
     }
     let revisionImageArea = getRequiredElementById('alt_prompt_image_area');
-    let revisionImages = [...revisionImageArea.querySelectorAll('.alt-prompt-image')].filter(c => c.tagName == "IMG");
-    if (revisionImages.length > 0) {
-        input["promptimages"] = revisionImages.map(img => img.dataset.filedata);
-    }
+    addPromptMediaToInput(input, revisionImageArea, extraMetadata);
     if (imageEditor.active) {
         extraMetadata["used_image_editor"] = "true";
         input["initimage"] = imageEditor.getFinalImageData();
@@ -1072,8 +1250,36 @@ function setDirectParamValue(param, value, paramElem = null, forceDropdowns = fa
         $(paramElem).val(vals);
         $(paramElem).trigger('change');
     }
-    else if (param.type == "image" || param.type == "image_list" || param.type == "audio" || param.type == "video") {
-        // do not edit raw data files directly, this will just misbehave
+    else if (param.type == "image_list" || param.type == "audio_list" || param.type == "video_list") {
+        // List too messy for impl for now - prompt inputs we can do though
+        if (param.id == 'promptimages' || param.id == 'promptaudios' || param.id == 'promptvideos') {
+            let paths = typeof value == 'string' ? value.split('|') : value;
+            for (let path of paths || []) {
+                if (isValidMediaPath(path)) {
+                    imagePromptAddImageData(`${getImageOutPrefix()}/${path}`, param.type.substring(0, param.type.indexOf('_')), path);
+                }
+            }
+        }
+        return;
+    }
+    else if (param.type == "image" || param.type == "audio" || param.type == "video") {
+        let pathVal = value == null ? '' : `${value}`;
+        if (!pathVal) {
+            clearMediaFileInput(paramElem);
+            return;
+        }
+        if (isValidMediaPath(pathVal)) {
+            let mediaType = getMediaType(pathVal);
+            let previewSrc = `${getImageOutPrefix()}/${pathVal}`;
+            let baseName = pathVal.substring(pathVal.lastIndexOf('/') + 1);
+            setMediaFileDirect(paramElem, previewSrc, mediaType, baseName, pathVal, () => {
+                paramElem.dataset.filedata = pathVal;
+            });
+            paramElem.dataset.filedata = pathVal;
+            return;
+        }
+        // do not edit raw data files directly (eg data URLs), this will just misbehave
+        return;
     }
     else if (paramElem.tagName == "SELECT") {
         if (![...paramElem.querySelectorAll('option')].map(o => o.value).includes(value)) {
@@ -1088,10 +1294,15 @@ function setDirectParamValue(param, value, paramElem = null, forceDropdowns = fa
     else if (param.type == "integer" || param.type == "decimal") {
         paramElem.value = value;
         if (!doTrigger) {
-            let range = document.getElementById(`input_${param.id}_rangeslider`);
-            if (range && range.oninput) {
-                range.value = value;
-                range.oninput({srcElement: range});
+            if (param.view_type == 'video_frames') {
+                paramElem.dispatchEvent(new Event('input'));
+            }
+            else {
+                let range = document.getElementById(`input_${param.id}_rangeslider`);
+                if (range && range.oninput) {
+                    range.value = value;
+                    range.oninput({srcElement: range});
+                }
             }
         }
     }
@@ -1101,6 +1312,23 @@ function setDirectParamValue(param, value, paramElem = null, forceDropdowns = fa
     if (doTrigger) {
         triggerChangeFor(paramElem);
     }
+}
+
+/** Clear all temporary parameter/group/etc. state data. */
+function clearParamStorage() {
+    for (let cookie of listCookies('lastparam_input_')) {
+        deleteCookie(cookie);
+    }
+    for (let cookie of listCookies('group_toggle_')) {
+        deleteCookie(cookie);
+    }
+    for (let cookie of listCookies('group_open_')) {
+        deleteCookie(cookie);
+    }
+    deleteCookie('selected_model');
+    localStorage.removeItem('display_advanced');
+    localStorage.removeItem('last_comfy_workflow_input');
+    localStorage.removeItem('current_presets');
 }
 
 function resetParamsToDefault(exclude = [], doDefaultPreset = true) {
@@ -1234,7 +1462,7 @@ function hideUnsupportableParams() {
             let paramToggler = document.getElementById(`input_${param.id}_toggle`);
             let isAltered = paramToggler ? paramToggler.checked : `${getInputVal(elem)}` != `${param.default}`;
             let group = param.original_group || param.group;
-            if (group && group.toggles && !getRequiredElementById(`input_group_content_${group.id}_toggle`).checked) {
+            if (group && group.toggles && !document.getElementById(`input_group_content_${group.id}_toggle`)?.checked) {
                 isAltered = false;
             }
             if (box && box.style.display == 'none' && box.dataset.visible_controlled) {
@@ -1430,10 +1658,11 @@ function controlnetShowPreview() {
         }
         let previewArea = getRequiredElementById('controlnet_button_preview');
         let clearPreview = () => {
-            let lastResult = previewArea.querySelector('.controlnet-preview-result');
-            if (lastResult) {
-                lastResult.remove();
+            for (let result of previewArea.querySelectorAll('.controlnet-preview-result, .controlnet-save-result')) {
+                result.remove();
             }
+            delete previewArea.dataset.controlnetPreviewImage;
+            getRequiredElementById('controlnet_button_save_preview').style.display = 'none';
         };
         clearPreview();
         let imgInput = getRequiredElementById('input_controlnetimageinput');
@@ -1455,13 +1684,51 @@ function controlnetShowPreview() {
             if (!data.image) {
                 return;
             }
-            let imgElem = document.createElement('img');
-            imgElem.src = data.image;
             let resultBox = createDiv(null, 'controlnet-preview-result');
-            resultBox.append(imgElem);
+            let isVideo = isVideoExt(data.image);
+            if (isVideo) {
+                let vidElem = document.createElement('video');
+                vidElem.loop = true;
+                vidElem.autoplay = true;
+                vidElem.muted = true;
+                vidElem.controls = true;
+                let sourceObj = document.createElement('source');
+                sourceObj.src = data.image;
+                sourceObj.type = isVideo;
+                vidElem.append(sourceObj);
+                resultBox.append(vidElem);
+            }
+            else {
+                let imgElem = document.createElement('img');
+                imgElem.src = data.image;
+                resultBox.append(imgElem);
+            }
             clearPreview();
+            previewArea.dataset.controlnetPreviewImage = data.image;
             previewArea.append(resultBox);
+            getRequiredElementById('controlnet_button_save_preview').style.display = '';
         });
+    });
+}
+
+/** Saves the current ControlNet preview to the server. */
+function controlnetSavePreviewToServer() {
+    let name = `controlnet-preview-${formatDateTime(new Date()).replaceAll(':', '-').replaceAll(' ', '_')}`;
+    let data = {
+        image: getRequiredElementById('controlnet_button_preview').dataset.controlnetPreviewImage,
+        ['Override Outpath Format']: `inputs/controlnet/${name}`
+    };
+    genericRequest('AddImageToHistory', data, res => {
+        let previewArea = getRequiredElementById('controlnet_button_preview');
+        let oldSaveResult = previewArea.querySelector('.controlnet-save-result');
+        if (oldSaveResult) {
+            oldSaveResult.remove();
+        }
+        let saveResult = createDiv(null, 'controlnet-save-result modal_success_bottom', 'Saved ControlNet preview.');
+        previewArea.append(saveResult);
+        setTimeout(() => {
+            saveResult.remove();
+        }, 5000);
     });
 }
 

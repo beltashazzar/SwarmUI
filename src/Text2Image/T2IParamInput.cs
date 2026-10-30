@@ -1,4 +1,4 @@
-﻿using FreneticUtilities.FreneticExtensions;
+using FreneticUtilities.FreneticExtensions;
 using FreneticUtilities.FreneticToolkit;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -13,7 +13,7 @@ namespace SwarmUI.Text2Image;
 public class T2IParamInput
 {
     /// <summary>Core section ID numbers.</summary>
-    public static int SectionID_BaseOnly = 5, SectionID_Refiner = 1, SectionID_Video = 2, SectionID_VideoSwap = 3;
+    public static int SectionID_BaseOnly = 5, SectionID_Refiner = 1, SectionID_Video = 2, SectionID_VideoSwap = 3, SectionID_PixelDecoder = 4, SectionID_SeedVR = 6;
 
     /// <summary>Parameter IDs that must be loaded early on, eg extracted from presets in prompts early. Primarily things that affect backend selection.</summary>
     public static readonly string[] ParamsMustLoadEarly = ["model", "images", "internalbackendtype", "exactbackendid"];
@@ -128,6 +128,9 @@ public class T2IParamInput
     /// <summary>Extra data to store in metadata.</summary>
     public Dictionary<string, object> ExtraMeta = [];
 
+    /// <summary>Indices in the LoRA parameter lists that are dynamically applied by prompt conditioning hooks.</summary>
+    public List<int> DynamicLoraIndices = [];
+
     /// <summary>A set of feature flags required for this input.</summary>
     public HashSet<string> RequiredFlags = [];
 
@@ -154,7 +157,7 @@ public class T2IParamInput
 
     /// <summary>Dense local time with incrementer.</summary>
     public int RequestRefTime;
-    
+
     /// <summary>If true, special early load has already ran.</summary>
     public bool EarlyLoadDone = false;
 
@@ -225,6 +228,9 @@ public class T2IParamInput
         ["9:21"] = (320, 768)
     };
 
+    /// <summary>Resolution precision currently in use.</summary>
+    public int TargetResolutionPrecision = 16;
+
     /// <summary>Gets the desired image width.</summary>
     public int GetImageWidth(int def = 512)
     {
@@ -235,7 +241,7 @@ public class T2IParamInput
         if (TryGet(T2IParamTypes.SideLength, out int sideLen) && TryGet(T2IParamTypes.AspectRatio, out string aspect) && ResolutionAspectReferences.TryGetValue(aspect, out (int, int) resRef))
         {
             // NOTE: This math must match params.js AspectRatio
-            return (int)Utilities.RoundToPrecision(resRef.Item1 * (sideLen / 512.0), 16);
+            return (int)Utilities.RoundToPrecision(resRef.Item1 * (sideLen / 512.0), TargetResolutionPrecision);
         }
         return Get(T2IParamTypes.Width, def);
     }
@@ -253,7 +259,7 @@ public class T2IParamInput
         }
         if (TryGet(T2IParamTypes.SideLength, out int sideLen) && TryGet(T2IParamTypes.AspectRatio, out string aspect) && ResolutionAspectReferences.TryGetValue(aspect, out (int, int) resRef))
         {
-            return (int)Utilities.RoundToPrecision(resRef.Item2 * (sideLen / 512.0), 16);
+            return (int)Utilities.RoundToPrecision(resRef.Item2 * (sideLen / 512.0), TargetResolutionPrecision);
         }
         return Get(T2IParamTypes.Height, def);
     }
@@ -264,6 +270,7 @@ public class T2IParamInput
         T2IParamInput toret = MemberwiseClone() as T2IParamInput;
         toret.InternalSet = InternalSet.Clone();
         toret.ExtraMeta = new Dictionary<string, object>(ExtraMeta);
+        toret.DynamicLoraIndices = [.. DynamicLoraIndices];
         toret.RequiredFlags = [.. RequiredFlags];
         toret.PendingPresets = [.. PendingPresets];
         toret.ParamsQueried = [.. ParamsQueried];
@@ -281,9 +288,9 @@ public class T2IParamInput
         {
             return file.AsBase64;
         }
-        else if (val is List<Image> imgList)
+        else if (val is IEnumerable<MediaFile> mediaList)
         {
-            return imgList.Select(img => img.AsBase64).JoinString("|");
+            return mediaList.Select(media => media.AsBase64).JoinString("|");
         }
         else if (val is List<string> strList)
         {
@@ -317,9 +324,18 @@ public class T2IParamInput
 
     public static JToken MetadatableToJTok(object val)
     {
-        if (val is MediaFile)
+        if (val is MediaFile mf)
         {
+            if (!string.IsNullOrEmpty(mf.SourceFilePath))
+            {
+                return JToken.FromObject(mf.SourceFilePath);
+            }
             return null;
+        }
+        if (val is IEnumerable<MediaFile> mediaFiles)
+        {
+            List<string> sourceFiles = [.. mediaFiles.Where(file => !string.IsNullOrEmpty(file.SourceFilePath)).Select(file => file.SourceFilePath)];
+            return sourceFiles.Count > 0 ? JArray.FromObject(sourceFiles) : null;
         }
         if (val is string str)
         {
@@ -372,14 +388,9 @@ public class T2IParamInput
         return output;
     }
 
-    /// <summary>Keys for <see cref="ExtraMeta"/> that identify lists of extra models to track, as a pair of (key, model-sub-type).</summary>
-    public static List<(string, string)> ModelListExtraKeys = [("used_embeddings", "Embedding"), ("loras", "LoRA")];
-
-    /// <summary>Generates a metadata JSON object for this input's data.</summary>
-    public JObject GenFullMetadataObject()
+    /// <summary>Builds the basic sui_extra_data object for metadata.</summary>
+    public JObject BuildExtraDataJObject()
     {
-        JObject paramData = GenParameterMetadata();
-        paramData["swarm_version"] = Utilities.Version;
         JObject extraData = [];
         foreach ((string key, object val) in ExtraMeta)
         {
@@ -389,6 +400,18 @@ public class T2IParamInput
                 extraData[key] = token;
             }
         }
+        return extraData;
+    }
+
+    /// <summary>Keys for <see cref="ExtraMeta"/> that identify lists of extra models to track, as a pair of (key, model-sub-type).</summary>
+    public static List<(string, string)> ModelListExtraKeys = [("used_embeddings", "Embedding"), ("loras", "LoRA")];
+
+    /// <summary>Generates a metadata JSON object for this input's data.</summary>
+    public JObject GenFullMetadataObject()
+    {
+        JObject paramData = GenParameterMetadata();
+        paramData["swarm_version"] = Utilities.Version;
+        JObject extraData = BuildExtraDataJObject();
         JArray unused = [];
         foreach (string key in InternalSet.ValuesInput.Keys)
         {
@@ -575,6 +598,26 @@ public class T2IParamInput
         return fixedVal.Replace("\a", "");
     }
 
+    /// <summary>Returns whether the parameter is present.</summary>
+    public bool ContainsRaw(T2IParamType param)
+    {
+        return InternalSet.ContainsRaw(param);
+    }
+
+    /// <summary>Returns whether the parameter is present.</summary>
+    public bool Contains<T>(T2IRegisteredParam<T> param, int sectionId = 0, bool includeBase = true)
+    {
+        if (sectionId > 0 && SectionParamOverrides.TryGetValue(sectionId, out T2IParamSet subSet) && subSet.Contains(param))
+        {
+            return true;
+        }
+        if (sectionId != 0 && !includeBase)
+        {
+            return false;
+        }
+        return InternalSet.Contains(param);
+    }
+
     /// <summary>Gets the raw value of the parameter, if it is present, or null if not.</summary>
     public object GetRaw(T2IParamType param)
     {
@@ -672,7 +715,7 @@ public class T2IParamInput
             RequiredFlags.UnionWith(param.Type.FeatureFlag.SplitFast(','));
         }
     }
-    
+
     /// <summary>Removes a param.</summary>
     public void Remove<T>(T2IRegisteredParam<T> param, int sectionId = 0)
     {

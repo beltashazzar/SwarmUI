@@ -1,10 +1,30 @@
-﻿using FreneticUtilities.FreneticExtensions;
+using FreneticUtilities.FreneticExtensions;
 
 namespace SwarmUI.Utils;
 
 /// <summary>Helper class to regionalize a prompt.</summary>
 public class PromptRegion
 {
+    /// <summary>Removes the first internal attachment with the given name from a prompt tag, and returns its value.</summary>
+    public static string RemoveTagAttachment(string tag, string name, out string value)
+    {
+        string marker = $"//{name}=";
+        int start = tag.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        if (start == -1)
+        {
+            value = null;
+            return tag;
+        }
+        int valueStart = start + marker.Length;
+        int end = tag.IndexOf("//", valueStart);
+        if (end == -1)
+        {
+            end = tag.Length;
+        }
+        value = tag[valueStart..end];
+        return tag.Remove(start, end - start);
+    }
+
     public string GlobalPrompt = "";
 
     public string BackgroundPrompt = "";
@@ -12,6 +32,8 @@ public class PromptRegion
     public string BasePrompt = "";
 
     public string RefinerPrompt = "";
+
+    public string PixelDecoderPrompt = "";
 
     public string VideoPrompt = "";
 
@@ -26,7 +48,7 @@ public class PromptRegion
     public static HashSet<string> CustomPartPrefixes = [];
 
     /// <summary>List of all prefixes for parts. Use <see cref="RegisterCustomPrefix(string)"/> to add to this.</summary>
-    public static List<string> PartPrefixes = ["<region:", "<object:", "<segment:", "<clear:", "<extend:", "<refiner", "<base", "<video"];
+    public static List<string> PartPrefixes = ["<region:", "<object:", "<segment:", "<clear:", "<extend:", "<refiner", "<base", "<video", "<pixeldecoder"];
 
     /// <summary>Custom Extensions can add new prompt part types here.
     /// <para>For example, this will add prompt parsing for &lt;example&gt; or &lt;example:somedata&gt; or etc:
@@ -92,7 +114,7 @@ public class PromptRegion
                 continue;
             }
             string tag = piece[..end];
-            (string tagBefore, string cidText) = tag.BeforeAndAfterLast("//cid=");
+            string tagBefore = RemoveTagAttachment(tag, "cid", out string cidText);
             if (!string.IsNullOrWhiteSpace(cidText) && int.TryParse(cidText, out int cid))
             {
                 id = cid;
@@ -127,6 +149,12 @@ public class PromptRegion
             {
                 RefinerPrompt += content;
                 addMore = s => RefinerPrompt += s;
+                continue;
+            }
+            else if (prefix == "pixeldecoder")
+            {
+                PixelDecoderPrompt += content;
+                addMore = s => PixelDecoderPrompt += s;
                 continue;
             }
             else if (prefix == "video")

@@ -93,11 +93,17 @@ function interpretMetadata(metadata) {
     if (metadata) {
         metadata = metadata.trim();
         if (metadata.startsWith('{')) {
-            let json = JSON.parse(metadata);
-            if ('sui_image_params' in json) {
+            let json = null;
+            try {
+                json = JSON.parse(metadata);
+            }
+            catch (e) {
+                console.error(`Error parsing metadata '${metadata}': ${e}`);
+            }
+            if (json && 'sui_image_params' in json) {
                 // It's swarm, we're good
             }
-            else if ("Prompt" in json) {
+            else if (json && "Prompt" in json) {
                 // Fooocus
                 json = remapMetadataKeys(json, fooocusMetadataMap);
                 metadata = JSON.stringify({ 'sui_image_params': json });
@@ -128,15 +134,20 @@ function interpretMetadata(metadata) {
 }
 
 function canvasReadBinaryAlpha(canvas, ctx, length) {
-    let data = '';
-    for (let x = 0; x < canvas.width; x++) {
-        for (let y = 0; y < canvas.height; y++) {
-            let pixel = ctx.getImageData(x, y, 1, 1).data;
-            data += (pixel[3] & 0x01) == 0 ? '0' : '1';
-            if (data.length >= length * 8) {
-                return data;
+    try {
+        let data = '';
+        for (let x = 0; x < canvas.width; x++) {
+            for (let y = 0; y < canvas.height; y++) {
+                let pixel = ctx.getImageData(x, y, 1, 1).data;
+                data += (pixel[3] & 0x01) == 0 ? '0' : '1';
+                if (data.length >= length * 8) {
+                    return data;
+                }
             }
         }
+    }
+    catch (e) {
+        console.error(`Error reading binary alpha: ${e}`);
     }
     return null;
 }
@@ -161,33 +172,42 @@ function parseMetadata(data, callback) {
         let img = new Image();
         img.src = data;
         img.onload = () => {
-            let canvas = document.createElement('canvas');
-            canvas.width = img.width;
-            canvas.height = img.height;
-            let ctx = canvas.getContext('2d');
-            ctx.drawImage(img, 0, 0);
-            let alphaData = canvasReadBinaryAlpha(canvas, ctx, "stealth_pnginfo".length + 4);
-            let headerBytes = binaryStringToBytes(alphaData);
-            let headerType = new TextDecoder().decode(new Uint8Array(headerBytes.slice(0, "stealth_pnginfo".length)));
-            if (headerType == "stealth_pnginfo" || headerType == "stealth_pngcomp") {
-                let dataLengthBytes = headerBytes.slice("stealth_pnginfo".length);
-                let dataLength = bytesToInt32(dataLengthBytes) / 8;
-                let alphaContent = canvasReadBinaryAlpha(canvas, ctx, dataLength + "stealth_pnginfo".length + 4);
-                let metadataBytes = new Uint8Array(binaryStringToBytes(alphaContent).slice("stealth_pnginfo".length + 4));
-                if (headerType == "stealth_pngcomp") {
-                    ungzip(metadataBytes).then(decompressed => {
-                        let metadata = new TextDecoder().decode(decompressed);
+            try {
+                let canvas = document.createElement('canvas');
+                canvas.width = img.width;
+                canvas.height = img.height;
+                let ctx = canvas.getContext('2d');
+                ctx.drawImage(img, 0, 0);
+                let alphaData = canvasReadBinaryAlpha(canvas, ctx, "stealth_pnginfo".length + 4);
+                let headerBytes = binaryStringToBytes(alphaData);
+                let headerType = new TextDecoder().decode(new Uint8Array(headerBytes.slice(0, "stealth_pnginfo".length)));
+                if (headerType == "stealth_pnginfo" || headerType == "stealth_pngcomp") {
+                    let dataLengthBytes = headerBytes.slice("stealth_pnginfo".length);
+                    let dataLength = bytesToInt32(dataLengthBytes) / 8;
+                    let alphaContent = canvasReadBinaryAlpha(canvas, ctx, dataLength + "stealth_pnginfo".length + 4);
+                    let metadataBytes = new Uint8Array(binaryStringToBytes(alphaContent).slice("stealth_pnginfo".length + 4));
+                    if (headerType == "stealth_pngcomp") {
+                        ungzip(metadataBytes).then(decompressed => {
+                            let metadata = new TextDecoder().decode(decompressed);
+                            metadata = interpretMetadata(metadata);
+                            callback(data, metadata);
+                        }).catch(err => {
+                            console.error(`Error unzipping metadata (stealth): ${err}`);
+                            callback(data, null);
+                        });
+                    }
+                    else {
+                        let metadata = new TextDecoder().decode(metadataBytes);
                         metadata = interpretMetadata(metadata);
                         callback(data, metadata);
-                    });
+                    }
                 }
                 else {
-                    let metadata = new TextDecoder().decode(metadataBytes);
-                    metadata = interpretMetadata(metadata);
-                    callback(data, metadata);
+                    callback(data, null);
                 }
             }
-            else {
+            catch (e) {
+                console.error(`Error parsing metadata (stealth): ${e}`);
                 callback(data, null);
             }
         };
@@ -210,31 +230,103 @@ function parseMetadata(data, callback) {
         metadata = interpretMetadata(metadata);
         callback(data, metadata);
     }).catch(err => {
+        console.error(`Error parsing metadata (exif): ${err}`);
         backupPlan();
+    });
+}
+
+/** Reads generation metadata from an audio or video file using music-metadata. */
+function parseMediaMetadata(data, callback) {
+    let blobPromise = data instanceof Blob ? Promise.resolve(data) : fetch(data).then(response => response.blob());
+    blobPromise.then(blob => MusicMetadata.parseBlob(blob, { duration: false, skipCovers: true })).then(parsed => {
+        let metadata = null;
+        for (let comment of parsed?.common?.comment ?? []) {
+            let text = typeof comment == 'string' ? comment : comment?.text;
+            let interpreted = interpretMetadata(text);
+            if (interpreted) {
+                metadata = interpreted;
+                break;
+            }
+        }
+        callback(data, metadata);
+    }).catch(err => {
+        console.error(`Error parsing metadata (audio/video): ${err}`);
+        callback(data, null);
     });
 }
 
 let metadataKeyFormatCleaners = [];
 let promptCidMatcher = new RegExp('\<(.*?)//cid=\\d+>', 'g');
 
-function formatMetadata(metadata) {
+function formatMetadataEntry(entry) {
+    return `<span class="param_view_block tag-text tag-type-${entry.hash}${entry.added}"><span class="param_view_name" title="${escapeHtmlNoBr(entry.keyTitle)}">${escapeHtml(entry.key)}:</span> ${entry.valueHtml}${entry.extras}</span>`;
+}
+
+/** Combines media filenames, resolutions, and durations into their corresponding parameter metadata values. */
+function combineMediaMetadata(data) {
+    if (!data.sui_extra_data) {
+        return;
+    }
+    let mediaTypes = ['image', 'audio', 'video', 'image_list', 'audio_list', 'video_list'];
+    for (let filenameKey of Object.keys(data.sui_extra_data).filter(key => key.endsWith('_filename'))) {
+        let paramId = filenameKey.substring(0, filenameKey.length - '_filename'.length);
+        let param = getParamById(paramId);
+        if (!param || !mediaTypes.includes(param.type)) {
+            continue;
+        }
+        let filenames = data.sui_extra_data[filenameKey];
+        let resolutions = data.sui_extra_data[`${paramId}_resolution`];
+        let durations = data.sui_extra_data[`${paramId}_duration`];
+        let values = data.sui_image_params[paramId];
+        let isList = param.type.endsWith('_list');
+        let filenameList = Array.isArray(filenames) ? filenames : [filenames];
+        let resolutionList = Array.isArray(resolutions) ? resolutions : [resolutions];
+        let durationList = Array.isArray(durations) ? durations : [durations];
+        let valueList = Array.isArray(values) ? values : [values];
+        let combined = [];
+        let count = isList ? Math.max(filenameList.length, valueList.length) : 1;
+        for (let i = 0; i < count; i++) {
+            let value = filenameList[i] || valueList[i];
+            if (!value) {
+                continue;
+            }
+            let duration = durationList[i];
+            if (duration) {
+                let durationNumber = parseFloat(duration);
+                value += ` (${Number.isNaN(durationNumber) ? duration : roundTo(durationNumber, 0.01)}s)`;
+            }
+            if (resolutionList[i]) {
+                value += ` (${resolutionList[i]})`;
+            }
+            combined.push(value);
+        }
+        if (combined.length > 0) {
+            data.sui_image_params[paramId] = isList ? combined : combined[0];
+        }
+        delete data.sui_extra_data[filenameKey];
+        delete data.sui_extra_data[`${paramId}_resolution`];
+        delete data.sui_extra_data[`${paramId}_duration`];
+    }
+}
+
+function getFormattedMetadataEntries(metadata) {
     if (!metadata) {
-        return '';
+        return { entries: [], error: '' };
     }
     let data;
     try {
         let readable = interpretMetadata(metadata);
         if (!readable) {
-            return '';
+            return { entries: [], error: '' };
         }
         data = JSON.parse(readable);
     }
     catch (e) {
         console.log(`Error parsing metadata '${metadata}': ${e}`);
-        return `Broken metadata: ${escapeHtml(metadata)}`;
+        return { entries: [], error: `Broken metadata: ${escapeHtml(metadata)}` };
     }
-    let result = '';
     function appendObject(obj) {
+        let result = [];
         if (obj) {
             for (let key of Object.keys(obj)) {
                 let val = obj[key];
@@ -242,6 +334,7 @@ function formatMetadata(metadata) {
                     for (let cleaner of metadataKeyFormatCleaners) {
                         key = cleaner(key);
                     }
+                    let id = key;
                     let hash = Math.abs(hashCode(key.toLowerCase().replaceAll(' ', '').replaceAll('_', ''))) % 10;
                     let title = '';
                     let keyTitle = '';
@@ -250,7 +343,10 @@ function formatMetadata(metadata) {
                     if (key.includes('model') || key.includes('lora') || key.includes('embedding')) {
                         added += ' param_view_block_model';
                     }
-                    if (key.includes('prompt')) {
+                    if (key == 'parser_warnings') {
+                        added += ' param_view_block_parser_warnings';
+                    }
+                    if (key.toLowerCase().includes('prompt')) {
                         extras = `<button title="Click to copy" class="basic-button prompt-copy-button" onclick="copyText('${escapeHtmlNoBr(escapeJsString(`${val}`))}');doNoticePopover('Copied!', 'notice-pop-green');">&#x29C9;</button>`;
                     }
                     if (key == 'unused_parameters' && Array.isArray(val)) {
@@ -267,19 +363,44 @@ function formatMetadata(metadata) {
                                 val = param.value_names[index];
                             }
                         }
+                        if (param.view_type == 'video_frames') {
+                            let frames = parseInt(val);
+                            if (Number.isFinite(frames)) {
+                                let fps = parseFloat((data.sui_image_params && data.sui_image_params.videofps) || (getParamById('videofps') || {}).default);
+                                if (!Number.isFinite(fps) || fps <= 0) {
+                                    fps = 24;
+                                }
+                                let seconds = formatNumberClean(frames / fps, 2);
+                                val = `${seconds} second${seconds == 1 ? '' : 's'} (${frames} frames)`;
+                            }
+                        }
                     }
-                    result += `<span class="param_view_block tag-text tag-type-${hash}${added}"><span class="param_view_name" title="${escapeHtmlNoBr(keyTitle)}">${escapeHtml(key)}</span>: `;
+                    let valueHtml, compareValue;
                     if (typeof val == 'object') {
-                        appendObject(val);
+                        valueHtml = appendObject(val).map(entry => formatMetadataEntry(entry)).join(', ');
+                        compareValue = JSON.stringify(val);
                     }
                     else {
-                        result += `<span class="param_view tag-text-soft tag-type-${hash}" title="${escapeHtmlNoBr(title)}">${escapeHtml(`${val}`)}</span>`;
+                        valueHtml = `<span class="param_view tag-text-soft tag-type-${hash}" title="${escapeHtmlNoBr(title)}">${escapeHtml(`${val}`)}</span>`;
+                        compareValue = `${val}`;
                     }
-                    result += `${extras}</span>, `;
+                    result.push({ id: id, key: key, keyTitle: keyTitle, hash: hash, added: added, extras: extras, valueHtml: valueHtml, compareValue: compareValue });
                 }
             }
         }
+        return result;
     };
+    let entries = [];
+    function appendEntries(newEntries, breakAfter = false) {
+        if (newEntries.length == 0) {
+            return;
+        }
+        if (breakAfter) {
+            newEntries[newEntries.length - 1].breakAfter = true;
+        }
+        entries.push(...newEntries);
+    }
+    combineMediaMetadata(data);
     if ('swarm_version' in data.sui_image_params && 'sui_extra_data' in data) {
         data.sui_extra_data['Swarm Version'] = data.sui_image_params.swarm_version;
         delete data.sui_image_params.swarm_version;
@@ -288,18 +409,29 @@ function formatMetadata(metadata) {
         let prompt = data.sui_image_params.prompt;
         if ('sui_extra_data' in data && 'original_prompt' in data.sui_extra_data) {
             let originalPrompt = data.sui_extra_data.original_prompt;
+            delete data.sui_extra_data.original_prompt;
             if (prompt.replaceAll(promptCidMatcher, '<$1>') == originalPrompt) {
                 prompt = originalPrompt;
-                delete data.sui_extra_data.original_prompt;
+            }
+            else {
+                if (getUserSetting('ui.interpretedpromptontop', false)) {
+                    appendEntries(appendObject({ 'Interpreted Prompt': prompt }), true);
+                    appendEntries(appendObject({ 'Original Prompt': originalPrompt }), true);
+                }
+                else {
+                    appendEntries(appendObject({ 'Original Prompt': originalPrompt }), true);
+                    appendEntries(appendObject({ 'Interpreted Prompt': prompt }), true);
+                }
+                prompt = null;
             }
         }
-        appendObject({ 'prompt': prompt });
-        result += '\n<br>';
+        if (prompt != null) {
+            appendEntries(appendObject({ 'prompt': prompt }), true);
+        }
         delete data.sui_image_params.prompt;
     }
     if ('negativeprompt' in data.sui_image_params && data.sui_image_params.negativeprompt) {
-        appendObject({ 'negativeprompt': data.sui_image_params.negativeprompt });
-        result += '\n<br>';
+        appendEntries(appendObject({ 'negativeprompt': data.sui_image_params.negativeprompt }), true);
         delete data.sui_image_params.negativeprompt;
     }
     if ('loras' in data.sui_image_params && 'loraweights' in data.sui_image_params) {
@@ -311,7 +443,7 @@ function formatMetadata(metadata) {
         for (let i = 0; i < loras.length; i++) {
             let lora = loras[i];
             let weight = `${loraWeights[i]}`;
-            if (loraSectionConfinement && loraSectionConfinement[i] != 0) {
+            if (loraSectionConfinement && loraSectionConfinement[i] > 0) {
                 let name = loraHelper.confinementNames[loraSectionConfinement[i]] || loraSectionConfinement[i];
                 weight = `${weight} (${name})`;
             }
@@ -347,15 +479,29 @@ function formatMetadata(metadata) {
     for (let key of Object.keys(data.sui_image_params)) {
         paramMap[key] = data.sui_image_params[key];
     }
-    appendObject(paramMap);
-    result += '\n<br>';
+    appendEntries(appendObject(paramMap), true);
     if ('sui_extra_data' in data) {
         if ('prep_time' in data.sui_extra_data && 'generation_time' in data.sui_extra_data) {
             data.sui_extra_data['Generation Time'] = `${data.sui_extra_data.prep_time} prep, ${data.sui_extra_data.generation_time} gen`;
             delete data.sui_extra_data.prep_time;
             delete data.sui_extra_data.generation_time;
         }
-        appendObject(data.sui_extra_data);
+        appendEntries(appendObject(data.sui_extra_data));
+    }
+    return { entries: entries, error: '' };
+}
+
+function formatMetadata(metadata) {
+    let formatted = getFormattedMetadataEntries(metadata);
+    if (formatted.error) {
+        return formatted.error;
+    }
+    let result = '';
+    for (let entry of formatted.entries) {
+        result += `${formatMetadataEntry(entry)}, `;
+        if (entry.breakAfter) {
+            result += '\n<br>';
+        }
     }
     return result;
 }

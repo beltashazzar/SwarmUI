@@ -1,4 +1,4 @@
-﻿using FreneticUtilities.FreneticToolkit;
+using FreneticUtilities.FreneticToolkit;
 using FreneticUtilities.FreneticDataSyntax;
 using LiteDB;
 using SwarmUI.Core;
@@ -172,10 +172,18 @@ public class User
     /// <summary>Returns the user preset for the given name, or null if not found.</summary>
     public T2IPreset GetPreset(string name)
     {
+        T2IPreset preset;
         lock (SessionHandlerSource.DBLock)
         {
-            return SessionHandlerSource.T2IPresets.FindById($"{UserID}///{name.ToLowerFast()}");
+            preset = SessionHandlerSource.T2IPresets.FindById($"{UserID}///{name.ToLowerFast()}");
         }
+        if (preset is null)
+        {
+            return null;
+        }
+        // TODO: Running this on every get is excessive. Need some amount of versioning/resaving.
+        preset.Clean();
+        return preset;
     }
 
     /// <summary>Returns a list of all presets this user has saved.</summary>
@@ -193,6 +201,10 @@ public class User
                     presets.RemoveAll(p => p is null);
                     Data.Presets.RemoveAll(bad.Contains);
                     Save();
+                }
+                foreach (T2IPreset preset in presets)
+                {
+                    preset.Clean();
                 }
                 return presets;
             }
@@ -273,6 +285,9 @@ public class User
 
     /// <summary>Returns the maximum simultaneous text-2-image requests appropriate to this user's restrictions and the available backends.</summary>
     public int CalcMaxT2ISimultaneous => Math.Max(1, Math.Min(CalculatedRole.Data.MaxT2ISimultaneous, Program.ServerSettings.Backends.UnrestrictedMaxT2iSimultaneous ? int.MaxValue : Program.Backends.RunningBackendsOfType<AbstractT2IBackend>().Sum(b => b.MaxUsages) * 2));
+
+    /// <summary>Returns a calculated total of all generations currently queued (or running) for this user across all sessions.</summary>
+    public int CalcTotalQueued => CurrentSessions.Values.Sum(session => session.WaitingGenerations);
 
     /// <summary>Lock object for this user's data.</summary>
     public LockObject UserLock = new();
@@ -507,13 +522,15 @@ public class User
         byte[] salt = RandomNumberGenerator.GetBytes(128 / 8);
         byte[] hashedText = KeyDerivation.Pbkdf2(password: validationText, salt: salt, prf: KeyDerivationPrf.HMACSHA256, iterationCount: 10, numBytesRequested: 256 / 8);
         string validationHashed = Utilities.BytesToHex(salt) + ":" + Utilities.BytesToHex(hashedText);
+        long nowUnix = DateTimeOffset.Now.ToUnixTimeSeconds();
         SessionHandler.LoginSession session = new()
         {
             ID = id,
             UserID = UserID,
             OriginAddress = ip,
             OriginUserAgent = userAgent,
-            LastActiveUnixTime = DateTimeOffset.Now.ToUnixTimeSeconds(),
+            CreatedUnixTime = nowUnix,
+            LastActiveUnixTime = nowUnix,
             ValidationHash = validationHashed
         };
         lock (SessionHandlerSource.DBLock)

@@ -31,6 +31,7 @@ public static class BasicAPIFeatures
         API.RegisterAPICall(Logout, true, Permissions.Fundamental);
         API.RegisterAPICall(InstallConfirmWS, true, Permissions.Install);
         API.RegisterAPICall(GetMyUserData, false, Permissions.FundamentalGenerateTabAccess);
+        API.RegisterAPICall(ExportUserPresets, false, Permissions.FundamentalGenerateTabAccess);
         API.RegisterAPICall(SetStarredModels, true, Permissions.FundamentalModelAccess);
         API.RegisterAPICall(SetPresetLinks, true, Permissions.FundamentalModelAccess);
         API.RegisterAPICall(AddNewPreset, true, Permissions.ManagePresets);
@@ -46,6 +47,9 @@ public static class BasicAPIFeatures
         API.RegisterAPICall(ServerDebugMessage, false, Permissions.ServerDebugMessage);
         API.RegisterAPICall(SetAPIKey, true, Permissions.EditUserSettings);
         API.RegisterAPICall(GetAPIKeyStatus, false, Permissions.ReadUserSettings);
+        API.RegisterAPICall(ListMyAuthTokens, false, Permissions.ReadUserSettings);
+        API.RegisterAPICall(RevokeMyAuthToken, true, Permissions.EditUserSettings);
+        API.RegisterAPICall(CreateAuthToken, true, Permissions.EditUserSettings);
         T2IAPI.Register();
         ModelsAPI.Register();
         BackendAPI.Register();
@@ -130,6 +134,10 @@ public static class BasicAPIFeatures
         [API.APIParameter("New registered account username.")] string username,
         [API.APIParameter("New registered account password.")] string password)
     {
+        if (!Program.ServerSettings.UserAuthorization.Registration.AllowRegistration || !Program.ServerSettings.UserAuthorization.Registration.SimplePasswordRegistration)
+        {
+            return new JObject() { ["error_id"] = "bad_api" };
+        }
         username = SessionHandler.UsernameValidator.TrimToMatches(username).ToLowerFast();
         string ip = WebUtil.GetIPString(context);
         if (username.Length < 3 || username.Length > 100 || password.Length < 8 || password.Length > 500)
@@ -185,6 +193,10 @@ public static class BasicAPIFeatures
         [API.APIParameter("Tracker key to identify the source OAuth request.")] string oauth_tracker_key,
         [API.APIParameter("OAuth provider type.")] string oauth_type)
     {
+        if (!Program.ServerSettings.UserAuthorization.Registration.AllowRegistration || !Program.ServerSettings.UserAuthorization.Registration.OAuthRegistration)
+        {
+            return new JObject() { ["error_id"] = "bad_api" };
+        }
         username = SessionHandler.UsernameValidator.TrimToMatches(username).ToLowerFast();
         string ip = WebUtil.GetIPString(context);
         if (username.Length < 3 || username.Length > 100)
@@ -325,12 +337,12 @@ public static class BasicAPIFeatures
     {
         if (Program.ServerSettings.IsInstalled)
         {
-            await socket.SendJson(new JObject() { ["error"] = $"Server is already installed!" }, API.WebsocketTimeout);
+            await socket.SendAndReportError($"InstallConfirmWS triggered by {session.User.UserID}", "Server is already installed!", API.WebsocketTimeout);
             return null;
         }
         try
         {
-            await Installation.Install(socket, theme, installed_for, backend, models, install_amd, language, make_shortcut);
+            await Installation.Install(socket, theme, installed_for, backend, models, install_amd, language, make_shortcut, session);
         }
         catch (SwarmReadableErrorException ex)
         {
@@ -352,7 +364,7 @@ public static class BasicAPIFeatures
                     "param_map": {
                         "key": "value"
                     },
-                    "preview_image": "data:base64 img",
+                    "preview_image": "/ViewSpecial/Preset/Preset Title",
                     "is_starred": false
                 }
             ],
@@ -377,12 +389,45 @@ public static class BasicAPIFeatures
         return new JObject()
         {
             ["user_name"] = session.User.UserID,
-            ["presets"] = new JArray(session.User.GetAllPresets().Select(p => p.NetData()).ToArray()),
+            ["presets"] = new JArray(session.User.GetAllPresets().Select(p => p.NetData(false)).ToArray()),
             ["language"] = session.User.Settings.Language,
             ["permissions"] = JArray.FromObject(session.User.GetPermissions()),
             ["starred_models"] = JObject.Parse(session.User.GetGenericData("starred_models", "full") ?? "{}"),
             ["model_preset_links"] = JObject.Parse(session.User.GetGenericData("modelpresetlinks", "full") ?? "{}"),
-            ["autocompletions"] = string.IsNullOrWhiteSpace(settings.Source) ? null : new JArray(AutoCompleteListHelper.GetData(settings.Source, settings.EscapeParens, settings.Suffix, settings.SpacingMode))
+            // TODO: Paren escaping is model-specific now, so maybe the escape should be handled elsewhere?
+            ["autocompletions"] = string.IsNullOrWhiteSpace(settings.Source) ? null : new JArray(AutoCompleteListHelper.GetData(settings.Source, settings.EscapeParens && session.User.Settings.ParamParsing.ParseAlternativePromptSyntaxes, settings.Suffix, settings.SpacingMode))
+        };
+    }
+
+    [API.APIDescription("Gets the user's presets with full base64 preview images embedded.",
+        """
+            "presets": [
+                {
+                    "author": "username",
+                    "title": "Preset Title",
+                    "description": "Preset Description",
+                    "param_map": { "key": "value" },
+                    "preview_image": "data:image/jpeg;base64,...",
+                    "is_starred": false
+                }
+            ]
+        """)]
+    public static async Task<JObject> ExportUserPresets(Session session,
+        [API.APIParameter("Optional 'titles' key holding a JSON array of preset titles to include.")] JObject raw)
+    {
+        HashSet<string> wanted = null;
+        if (raw is not null && raw.TryGetValue("titles", out JToken titlesTok) && titlesTok is JArray titlesArr)
+        {
+            wanted = [.. titlesArr.Select(t => t.ToString())];
+        }
+        IEnumerable<T2IPreset> presets = session.User.GetAllPresets();
+        if (wanted is not null)
+        {
+            presets = presets.Where(p => wanted.Contains(p.Title));
+        }
+        return new JObject()
+        {
+            ["presets"] = new JArray(presets.Select(p => p.NetData(true)).ToArray())
         };
     }
 
@@ -436,6 +481,10 @@ public static class BasicAPIFeatures
         {
             return new JObject() { ["preset_fail"] = "A preset with that title already exists." };
         }
+        if (preview_image is not null && preview_image.StartsWith("/ViewSpecial/"))
+        {
+            preview_image = null;
+        }
         if (!string.IsNullOrWhiteSpace(preview_image) && preview_image != "imgs/model_placeholder.jpg")
         {
             if ((!preview_image.StartsWith("data:image/jpeg;base64,") && !preview_image.StartsWith("/Output")) || preview_image.Contains('?'))
@@ -446,6 +495,10 @@ public static class BasicAPIFeatures
             ImageFile img = ImageFile.FromDataString(preview_image).ToMetadataJpg(preview_image_metadata);
             preview_image = img.AsDataString();
         }
+        if (string.IsNullOrWhiteSpace(preview_image) && existingPreset is not null)
+        {
+            preview_image = existingPreset.PreviewImage;
+        }
         T2IPreset preset = new()
         {
             Author = session.User.UserID,
@@ -455,6 +508,7 @@ public static class BasicAPIFeatures
             PreviewImage = string.IsNullOrWhiteSpace(preview_image) ? "imgs/model_placeholder.jpg" : preview_image,
             IsStarred = is_starred
         };
+        Interlocked.Increment(ref ModelsAPI.ModelEditID);
         if (is_edit && existingPreset is not null && editing != title)
         {
             session.User.DeletePreset(editing);
@@ -706,6 +760,102 @@ public static class BasicAPIFeatures
     {
         Logs.Info($"User '{session.User.UserID}' sent a debug message: {message}");
         return new JObject() { ["success"] = true };
+    }
+
+    [API.APIDescription("User route to list the current user's auth tokens (login sessions).\nOnly valid if authorization is enabled.",
+        """
+            "tokens": [
+                {
+                    "id": "abc123", // Note this is not the full token, just the ID prefix.
+                    "created": 1700000000, // Unix time seconds.
+                    "last_active": 1700001000,
+                    "user_agent": "Mozilla/5.0...",
+                    "origin_address": "127.0.0.1",
+                    "is_current": true // If this was the token that sent this request.
+                }
+            ]
+        """)]
+    public static async Task<JObject> ListMyAuthTokens(HttpContext context, Session session)
+    {
+        if (!Program.ServerSettings.UserAuthorization.AuthorizationRequired)
+        {
+            return new JObject() { ["error"] = "Authorization is not enabled." };
+        }
+        string[] swarmToken = WebUtil.GetSwarmTokenFor(context);
+        string currentTokenId = swarmToken?[1];
+        JArray tokens = [];
+        lock (Program.Sessions.DBLock)
+        {
+            foreach (string tokenId in session.User.Data.LoginSessions)
+            {
+                SessionHandler.LoginSession loginSession = Program.Sessions.LoginSessions.FindById(tokenId);
+                if (loginSession is null)
+                {
+                    continue;
+                }
+                tokens.Add(new JObject()
+                {
+                    ["id"] = tokenId,
+                    ["created"] = loginSession.CreatedUnixTime,
+                    ["last_active"] = loginSession.LastActiveUnixTime,
+                    ["user_agent"] = loginSession.OriginUserAgent ?? "unknown",
+                    ["origin_address"] = loginSession.OriginAddress ?? "unknown",
+                    ["is_current"] = tokenId == currentTokenId
+                });
+            }
+        }
+        return new JObject() { ["tokens"] = tokens };
+    }
+
+    [API.APIDescription("User route to revoke (delete) one of the current user's auth tokens.",
+        """
+            "success": true
+        """)]
+    public static async Task<JObject> RevokeMyAuthToken(HttpContext context, Session session,
+        [API.APIParameter("The ID of the token to revoke.")] string tokenId)
+    {
+        if (!Program.ServerSettings.UserAuthorization.AuthorizationRequired)
+        {
+            return new JObject() { ["error"] = "Authorization is not enabled." };
+        }
+        lock (Program.Sessions.DBLock)
+        {
+            if (!session.User.Data.LoginSessions.Remove(tokenId))
+            {
+                return new JObject() { ["error"] = "Token not found." };
+            }
+            Program.Sessions.LoginSessions.Delete(tokenId);
+            foreach (Session sess in Program.Sessions.Sessions.Values.Where(s => s.OriginToken == tokenId).ToArray())
+            {
+                Program.Sessions.RemoveSession(sess);
+            }
+            session.User.Save();
+        }
+        return new JObject() { ["success"] = true };
+    }
+
+    [API.APIDescription("User route to create a new auth token (login session) for the current user.\nOnly valid if authorization is enabled.",
+        """
+            "token": "useridhex.tokenid.validationtext"
+        """)]
+    public static async Task<JObject> CreateAuthToken(HttpContext context, Session session,
+        [API.APIParameter("A user-provided reason/label for this token, stored as the user-agent.")] string reason)
+    {
+        if (!Program.ServerSettings.UserAuthorization.AuthorizationRequired)
+        {
+            return new JObject() { ["error"] = "Authorization is not enabled." };
+        }
+        if (string.IsNullOrWhiteSpace(reason) || reason.Length > 500)
+        {
+            return new JObject() { ["error"] = "Reason must be between 1 and 500 characters." };
+        }
+        string ip = WebUtil.GetIPString(context);
+        (_, string rawToken) = session.User.CreateLoginSession(ip, reason);
+        if (rawToken is null)
+        {
+            return new JObject() { ["error"] = "Failed to create token." };
+        }
+        return new JObject() { ["token"] = rawToken };
     }
 
     public static HashSet<string> AcceptedAPIKeyTypes = ["stability_api", "civitai_api", "huggingface_api"];

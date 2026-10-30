@@ -1,4 +1,5 @@
-﻿using FreneticUtilities.FreneticExtensions;
+using FreneticUtilities.FreneticExtensions;
+using Newtonsoft.Json.Linq;
 using SwarmUI.Accounts;
 using SwarmUI.Core;
 using SwarmUI.Media;
@@ -29,6 +30,8 @@ public class T2IParamSet
             object useVal = val;
             if (useVal is List<string> strs) { useVal = new List<string>(strs); }
             else if (useVal is List<Image> imgs) { useVal = new List<Image>(imgs); }
+            else if (useVal is List<AudioFile> audios) { useVal = new List<AudioFile>(audios); }
+            else if (useVal is List<VideoFile> videos) { useVal = new List<VideoFile>(videos); }
             else if (useVal is List<T2IModel> models) { useVal = new List<T2IModel>(models); }
             toret.ValuesInput[key] = useVal;
         }
@@ -46,6 +49,18 @@ public class T2IParamSet
         {
             Set(T2IParamTypes.VariationSeed, Random.Shared.Next());
         }
+    }
+
+    /// <summary>Returns whether the parameter is present.</summary>
+    public bool ContainsRaw(T2IParamType param)
+    {
+        return ValuesInput.ContainsKey(param.ID);
+    }
+
+    /// <summary>Returns whether the parameter is present.</summary>
+    public bool Contains<T>(T2IRegisteredParam<T> param)
+    {
+        return ContainsRaw(param.Type);
     }
 
     /// <summary>Gets the raw value of the parameter, if it is present, or null if not.</summary>
@@ -154,6 +169,13 @@ public class T2IParamSet
             {
                 return ImageFile.FromDataString(val);
             }
+            if (val.StartsWithFast('{'))
+            {
+                JObject parsed = val.ParseToJson();
+                ImageFile result = ImageFile.FromDataString(parsed["data"].ToString());
+                result.SourceFilePath = parsed["filename"].ToString();
+                return result;
+            }
             return ImageFile.FromBase64(val, MediaType.ImagePng);
         }
         AudioFile audioFor(string val)
@@ -161,6 +183,13 @@ public class T2IParamSet
             if (val.StartsWithFast("data:"))
             {
                 return AudioFile.FromDataString(val);
+            }
+            if (val.StartsWithFast('{'))
+            {
+                JObject parsed = val.ParseToJson();
+                AudioFile result = AudioFile.FromDataString(parsed["data"].ToString());
+                result.SourceFilePath = parsed["filename"].ToString();
+                return result;
             }
             return AudioFile.FromBase64(val, MediaType.AudioWav);
         }
@@ -170,7 +199,14 @@ public class T2IParamSet
             {
                 return VideoFile.FromDataString(val);
             }
-            return VideoFile.FromBase64(val, MediaType.AudioWav);
+            if (val.StartsWithFast('{'))
+            {
+                JObject parsed = val.ParseToJson();
+                VideoFile result = VideoFile.FromDataString(parsed["data"].ToString());
+                result.SourceFilePath = parsed["filename"].ToString();
+                return result;
+            }
+            return VideoFile.FromBase64(val, MediaType.VideoMp4);
         }
         object obj = param.Type switch
         {
@@ -183,7 +219,9 @@ public class T2IParamSet
             T2IParamDataType.MODEL => getModel(val),
             T2IParamDataType.LIST => val.Split(val.Contains("\n|||\n") ? "\n|||\n" : ",", StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList(),
             T2IParamDataType.AUDIO => audioFor(val),
+            T2IParamDataType.AUDIO_LIST => val.Split(val.Contains("\n|||\n") ? "\n|||\n" : "|").Select(audioFor).ToList(),
             T2IParamDataType.VIDEO => videoFor(val),
+            T2IParamDataType.VIDEO_LIST => val.Split(val.Contains("\n|||\n") ? "\n|||\n" : "|").Select(videoFor).ToList(),
             _ => throw new NotImplementedException()
         };
         if (param.SharpType == typeof(int))

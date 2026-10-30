@@ -1,4 +1,4 @@
-﻿using FreneticUtilities.FreneticExtensions;
+using FreneticUtilities.FreneticExtensions;
 using FreneticUtilities.FreneticToolkit;
 using SwarmUI.Core;
 using SwarmUI.Utils;
@@ -26,6 +26,9 @@ public class T2IPromptHandling
 
         public int Depth = 0;
 
+        /// <summary>How many enclosing step-scheduled prompt tags are currently being parsed.</summary>
+        public int DynamicDepth = 0;
+
         /// <summary>If the current syntax usage has a pre-data block, it will be here. This will be null otherwise.</summary>
         public string PreData;
 
@@ -49,9 +52,22 @@ public class T2IPromptHandling
             }
             Depth++;
             int sectionId = SectionID;
+            string preData = PreData, rawCurrent = RawCurrentTag, param = Param;
             string result = ProcessPromptLike(text, this, false);
+            Param = param;
+            RawCurrentTag = rawCurrent;
+            PreData = preData;
             SectionID = sectionId;
             Depth--;
+            return result;
+        }
+
+        /// <summary>Parses text nested inside a step-scheduled prompt tag.</summary>
+        public string ParseDynamic(string text)
+        {
+            DynamicDepth++;
+            string result = Parse(text);
+            DynamicDepth--;
             return result;
         }
     }
@@ -102,6 +118,20 @@ public class T2IPromptHandling
         return [.. output.Select(v => v.Trim())];
     }
 
+    /// <summary>Joins values so <see cref="SplitSmart"/> will split them back apart correctly.</summary>
+    public static string JoinSmart(string[] vals)
+    {
+        if (vals.Any(v => v.Contains('|')))
+        {
+            return vals.JoinString("||");
+        }
+        if (vals.Any(v => v.Contains(',')))
+        {
+            return vals.JoinString("|");
+        }
+        return vals.JoinString(",");
+    }
+
     /// <summary>Mapping of prompt tag prefixes, to allow for registration of custom prompt tags.</summary>
     public static Dictionary<string, Func<string, PromptTagContext, string>> PromptTagProcessors = [];
 
@@ -141,6 +171,7 @@ public class T2IPromptHandling
     /// <summary>Interprets a number input by a user, or returns null if unable to.</summary>
     public static double? InterpretNumber(string inputVal, PromptTagContext context)
     {
+        inputVal = context.Parse(inputVal);
         if (TryInterpretNumberRange(inputVal, context, out string number))
         {
             inputVal = number;
@@ -245,9 +276,9 @@ public class T2IPromptHandling
             }
             for (int i = 0; i < rawVals.Length; i++)
             {
-                rawVals[i] = context.Parse(rawVals[i]);
+                rawVals[i] = context.ParseDynamic(rawVals[i]);
             }
-            return $"[{rawVals.Select(EscapeForTextHandler).JoinString("|")}]";
+            return $"<alternate:{JoinSmart(rawVals)}>";
         };
         PromptTagProcessors["alt"] = PromptTagProcessors["alternate"];
         PromptTagLengthEstimators["alternate"] = PromptTagLengthEstimators["random"];
@@ -268,11 +299,25 @@ public class T2IPromptHandling
             }
             for (int i = 0; i < rawVals.Length; i++)
             {
-                rawVals[i] = context.Parse(rawVals[i]);
+                rawVals[i] = context.ParseDynamic(rawVals[i]);
             }
-            return $"[{rawVals.Select(EscapeForTextHandler).JoinString(":")}:{stepIndex}]";
+            return $"<fromto[{stepIndex:0.######}]:{JoinSmart(rawVals)}>";
         };
         PromptTagLengthEstimators["fromto"] = PromptTagLengthEstimators["random"];
+        PromptTagProcessors["weight"] = (data, context) =>
+        {
+            double? weightVal = InterpretNumber(context.PreData, context);
+            if (!weightVal.HasValue)
+            {
+                context.TrackWarning($"Weight input 'weight[{context.PreData}]:{data}' has invalid predata weight value (not a number) and will be ignored.");
+                return null;
+            }
+            return $"<weight[{weightVal:0.######}]:{context.Parse(data)}>";
+        };
+        PromptTagLengthEstimators["weight"] = (data, context) =>
+        {
+            return ProcessPromptLikeForLength(data);
+        };
         PromptTagProcessors["wildcard"] = (data, context) =>
         {
             data = context.Parse(data);
@@ -447,12 +492,16 @@ public class T2IPromptHandling
         PromptTagProcessors["param"] = (data, context) =>
         {
             string preData = context.PreData;
+            data = context.Parse(data).Trim();
             if (preData is null)
             {
+                if (!string.IsNullOrWhiteSpace(data) && T2IParamTypes.TryGetType(data, out T2IParamType readType, context.Input))
+                {
+                    return $"{context.Input.GetRaw(readType) ?? ""}";
+                }
                 context.TrackWarning("Prompt tag 'param' requires pre-data to specify the parameter name.");
                 return null;
             }
-            data = context.Parse(data).Trim();
             if (T2IParamTypes.TryGetType(preData, out T2IParamType type, context.Input))
             {
                 T2IParamTypes.ApplyParameter(preData, data, context.Input, type.CanSectionalize ? context.SectionID : 0);
@@ -492,12 +541,15 @@ public class T2IPromptHandling
                 List<string> usedEmbeds = context.Input.ExtraMeta.GetOrCreate("used_embeddings", () => new List<string>()) as List<string>;
                 usedEmbeds.Add(T2IParamTypes.CleanModelName(matched));
             }
-            return "\0swarmembed:" + matched + "\0end";
+            return "\0swarmembed:" + T2IParamTypes.CleanModelName(matched) + "\0end";
         };
         PromptTagProcessors["embedding"] = PromptTagProcessors["embed"];
         PromptTagPostProcessors["lora"] = (data, context) =>
         {
-            data = context.Parse(data);
+            data = PromptRegion.RemoveTagAttachment(data, "hook", out _);
+            string retainedData = data;
+            string parseData = PromptRegion.RemoveTagAttachment(data, "cid", out _);
+            data = context.Parse(parseData);
             string lora = data.ToLowerFast().Replace('\\', '/');
             int colonIndex = lora.IndexOf(':');
             double strength = 1;
@@ -553,6 +605,7 @@ public class T2IPromptHandling
                 confinements = null;
             }
             loraList.Add(matched);
+            int loraIndex = loraList.Count - 1;
             weights.Add(strength.ToString());
             context.Input.Set(T2IParamTypes.Loras, loraList);
             context.Input.Set(T2IParamTypes.LoraWeights, weights);
@@ -584,6 +637,12 @@ public class T2IPromptHandling
             context.Input.Set(T2IParamTypes.LoraSectionConfinement, confinements);
             List<string> promptedLoras = context.Input.ExtraMeta.GetOrCreate("prompted_loras", () => new List<string>()) as List<string>;
             promptedLoras.Add(T2IParamTypes.CleanModelName(matched));
+            if (context.DynamicDepth > 0)
+            {
+                int hookId = context.Input.DynamicLoraIndices.Count;
+                context.Input.DynamicLoraIndices.Add(loraIndex);
+                return $"<lora:{retainedData}//hook={hookId}>";
+            }
             return "";
         };
         PromptTagBasicProcessors["base"] = (data, context) =>
@@ -598,6 +657,12 @@ public class T2IPromptHandling
             return $"<refiner//cid={T2IParamInput.SectionID_Refiner}>";
         };
         PromptTagLengthEstimators["refiner"] = estimateAsSectionBreak;
+        PromptTagBasicProcessors["pixeldecoder"] = (data, context) =>
+        {
+            context.SectionID = T2IParamInput.SectionID_PixelDecoder;
+            return $"<pixeldecoder//cid={T2IParamInput.SectionID_PixelDecoder}>";
+        };
+        PromptTagLengthEstimators["pixeldecoder"] = estimateAsSectionBreak;
         PromptTagBasicProcessors["video"] = (data, context) =>
         {
             context.SectionID = T2IParamInput.SectionID_Video;
@@ -617,7 +682,7 @@ public class T2IPromptHandling
                 context.SectionID = 10;
             }
             context.SectionID++;
-            string raw = context.RawCurrentTag.Before("//cid=");
+            string raw = PromptRegion.RemoveTagAttachment(context.RawCurrentTag, "cid", out _);
             return $"<{raw}//cid={context.SectionID}>";
         }
         PromptTagBasicProcessors["segment"] = autoConfine;
@@ -723,6 +788,28 @@ public class T2IPromptHandling
         PromptTagLengthEstimators["comment"] = estimateEmpty;
     }
 
+    public static int IndexOfNoncontained(string val, char c)
+    {
+        int depth = 0;
+        for (int i = 0; i < val.Length; i++)
+        {
+            char ch = val[i];
+            if (ch == '<')
+            {
+                depth++;
+            }
+            else if (ch == '>')
+            {
+                depth--;
+            }
+            else if (ch == c && depth == 0)
+            {
+                return i;
+            }
+        }
+        return -1;
+    }
+
     /// <summary>Special utility to process prompt inputs before the request is executed (to parse wildcards, embeddings, etc).</summary>
     public static string ProcessPromptLike(string val, PromptTagContext context, bool isMain)
     {
@@ -732,22 +819,31 @@ public class T2IPromptHandling
         }
         string addBefore = "", addAfter = "";
         int baseSectionId = context.SectionID;
-        void processSet(Dictionary<string, Func<string, PromptTagContext, string>> set)
+        void processSet(Dictionary<string, Func<string, PromptTagContext, string>> set, int setId)
         {
             context.SectionID = baseSectionId;
             val = StringConversionHelper.QuickSimpleTagFiller(val, "<", ">", tag =>
             {
-                (string prefix, string data) = tag.BeforeAndAfter(':');
-                string preData = null;
-                if (prefix.EndsWith(']') && prefix.Contains('['))
+                string prefix = tag;
+                string data = "";
+                int colonIndex = IndexOfNoncontained(tag, ':');
+                if (colonIndex != -1)
                 {
-                    (prefix, preData) = prefix.BeforeLast(']').BeforeAndAfter('[');
+                    prefix = tag[..colonIndex];
+                    data = tag[(colonIndex + 1)..];
+                }
+                string preData = null;
+                int bracket = IndexOfNoncontained(prefix, '[');
+                if (prefix.EndsWith(']') && bracket != -1)
+                {
+                    preData = prefix[(bracket + 1)..^1];
+                    prefix = prefix[..bracket];
                 }
                 prefix = prefix.ToLowerFast();
                 context.RawCurrentTag = tag;
                 context.PreData = preData;
                 int sectionId = context.SectionID;
-                Logs.Verbose($"[Prompt Parsing] Found tag {val}, will fill... prefix = '{prefix}', data = '{data}', predata = '{preData}', section = '{sectionId}'");
+                Logs.Verbose($"[Prompt Parsing] Found tag {val}, will fill... prefix = '{prefix}', data = '{data}', predata = '{preData}', section = '{sectionId}', setID = '{setId}'");
                 if (set.TryGetValue(prefix, out Func<string, PromptTagContext, string> proc))
                 {
                     string result = proc(data, context);
@@ -771,22 +867,24 @@ public class T2IPromptHandling
                                 return "";
                             }
                         }
+                        Logs.Verbose($"Result is: {result}");
                         return result;
                     }
                 }
-                int cidCut = tag.LastIndexOf("//cid=");
-                if (cidCut != -1)
+                PromptRegion.RemoveTagAttachment(tag, "cid", out string cidText);
+                if (int.TryParse(cidText, out int cid))
                 {
-                    sectionId = int.Parse(tag[(cidCut + "//cid=".Length)..]);
+                    sectionId = cid;
                     Logs.Verbose($"[Prompt Parsing] Section ID changed by a prior mapping from {context.SectionID} to  {sectionId}");
                     context.SectionID = sectionId;
                 }
+                Logs.Verbose($"Result is raw tag <{tag}>");
                 return $"<{tag}>";
             }, false, 0);
         }
-        processSet(PromptTagBasicProcessors);
-        processSet(PromptTagProcessors);
-        processSet(PromptTagPostProcessors);
+        processSet(PromptTagBasicProcessors, 0);
+        processSet(PromptTagProcessors, 1);
+        processSet(PromptTagPostProcessors, 2);
         if (isMain)
         {
             string triggerPhrase = context.TriggerPhraseExtra;
@@ -796,7 +894,12 @@ public class T2IPromptHandling
             }
             val = val.Replace("\0triggerextra", triggerPhrase);
         }
-        return addBefore + val + addAfter;
+        val = addBefore + val + addAfter;
+        if (isMain && (context.Input?.SourceSession?.User?.Settings?.ParamParsing?.ParseAlternativePromptSyntaxes ?? true) && (context.Input?.Get(T2IParamTypes.Model)?.ModelClass?.CompatClass?.SupportLegacyPromptParser ?? false))
+        {
+            val = LegacyPromptParser.Convert(val);
+        }
+        return val;
     }
 
     public static string ProcessPromptLikeForLength(string val)
@@ -810,11 +913,20 @@ public class T2IPromptHandling
         {
             val = StringConversionHelper.QuickSimpleTagFiller(val, "<", ">", tag =>
             {
-                (string prefix, string data) = tag.BeforeAndAfter(':');
-                string preData = null;
-                if (prefix.EndsWith(']') && prefix.Contains('['))
+                string prefix = tag;
+                string data = "";
+                int colonIndex = IndexOfNoncontained(tag, ':');
+                if (colonIndex != -1)
                 {
-                    (prefix, preData) = prefix.BeforeLast(']').BeforeAndAfter('[');
+                    prefix = tag[..colonIndex];
+                    data = tag[(colonIndex + 1)..];
+                }
+                string preData = null;
+                int bracket = IndexOfNoncontained(prefix, '[');
+                if (prefix.EndsWith(']') && bracket != -1)
+                {
+                    preData = prefix[(bracket + 1)..^1];
+                    prefix = prefix[..bracket];
                 }
                 context.PreData = preData;
                 if (set.TryGetValue(prefix, out Func<string, PromptTagContext, string> proc))

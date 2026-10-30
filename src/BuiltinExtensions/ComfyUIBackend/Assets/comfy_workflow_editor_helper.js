@@ -1,6 +1,71 @@
 /** If true, the workflow iframe is present. If false, the tab has never been opened, or loading failed. */
 let hasComfyLoaded = false;
 
+/** Helper class managing the "ComfyUI Torch Versions" card on the Server Info tab. */
+class ComfyTorchManager {
+
+    constructor() {
+        getRequiredElementById('serverinfotabbutton').addEventListener('click', () => this.refresh());
+        getRequiredElementById('servertabbutton').addEventListener('click', () => this.refresh());
+        let serverInfoTab = document.getElementById('Server-Info');
+        let collection = createDiv(null, 'card-collection-inline');
+        this.card = createDiv('comfy_torch_card', 'card border-secondary mb-3 card-center-container');
+        this.card.dataset.requiredpermission = 'view_backends_list';
+        this.card.style.display = 'none';
+        this.card.innerHTML = `<div class="card-header translate">ComfyUI Torch Versions</div><div class="card-body"><span class="card-text" id="comfy_torch_card_body">(Loading...)</span></div>`;
+        collection.appendChild(this.card);
+        serverInfoTab.appendChild(collection);
+        this.bodyElem = getRequiredElementById('comfy_torch_card_body');
+    }
+
+    /** Refreshes the torch install list from the server and rebuilds the card body. */
+    refresh() {
+        if (!permissions.hasPermission('view_backends_list')) {
+            return;
+        }
+        genericRequest('ComfyListTorchInstalls', {}, (data) => {
+            if (!data.installs || data.installs.length == 0) {
+                this.card.style.display = 'none';
+                return;
+            }
+            this.card.style.display = '';
+            let html = `<table class="simple-table"><tr><th>Install Folder</th><th>Torch Version</th><th>Backend IDs</th><th>Action</th></tr>`;
+            for (let install of data.installs) {
+                let action;
+                if (install.can_update) {
+                    action = `<button class="basic-button translate" onclick="comfyTorchManager.updateTorch(this, '${escapeHtml(install.path)}', ${install.backend_ids[0]})">Update Torch</button>`;
+                }
+                else {
+                    action = `(None)`;
+                }
+                html += `<tr><td><code>${escapeHtml(install.path)}</code></td><td><code>${escapeHtml(install.torch_version)}</code></td><td>${escapeHtml(install.backend_ids.join(', '))}</td><td>${action}</td></tr>`;
+            }
+            html += `</table>`;
+            this.bodyElem.innerHTML = html;
+        });
+    }
+
+    /** Triggered by the Update Torch button, to run a torch update for one install folder. */
+    updateTorch(button, path, backendId) {
+        if (!confirm(`Are you sure you want to update PyTorch for the ComfyUI install at:\n${path}\n\nThis is experimental! It will take a while, download several gigabytes of data, and might even break things!`)) {
+            return;
+        }
+        button.disabled = true;
+        button.parentElement.querySelectorAll('.installing_info').forEach(e => e.remove());
+        let status = createDiv(null, 'installing_info', 'Updating torch (this may take several minutes, check server logs for details)...');
+        button.parentElement.appendChild(status);
+        genericRequest('ComfyUpdateTorch', { 'backendId': backendId }, (data) => {
+            status.innerText = 'Torch updated, backends restarting.';
+            setTimeout(() => this.refresh(), 3000);
+        }, 0, (e) => {
+            status.innerText = 'Failed to update torch: ' + e;
+            button.disabled = false;
+        });
+    }
+}
+
+let comfyTorchManager = new ComfyTorchManager();
+
 /** Helper class for managing the Comfy workflow tab. */
 class ComfyWorkflowHelpers {
 
@@ -26,7 +91,7 @@ let comfyHasTriedToLoad = false;
 
 let comfyAltSaveNodes = ['ADE_AnimateDiffCombine', 'VHS_VideoCombine', 'SaveAnimatedWEBP', 'SaveAnimatedPNG', 'SwarmSaveAnimatedWebpWS', 'SwarmSaveAnimationWS'];
 
-let swarmComfyInjectedHeaderSpacer = null, swarmComfySideToolbar = null, swarmComfySidePanel = null, swarmComfyBreadcrumbs = null;
+let swarmComfyInjectedHeaderSpacer = null, swarmComfySideToolbar = null, swarmComfySidePanel = null, swarmComfyBreadcrumbs = null, swarmComfySubGraphBar = null;
 
 let swarmComfyHasPinia = false;
 
@@ -156,6 +221,10 @@ function comfyFixMenuLocation() {
     swarmComfyBreadcrumbs = frame.contentWindow.document.querySelector('.p-breadcrumb-list');
     if (swarmComfyBreadcrumbs) {
         swarmComfyBreadcrumbs.style.paddingLeft = '250px';
+    }
+    swarmComfySubGraphBar = frame.contentWindow.document.querySelector('.subgraph-breadcrumb');
+    if (swarmComfySubGraphBar) {
+        swarmComfySubGraphBar.style.paddingLeft = '250px';
     }
     // Comfy frontend added an aggro warning if frontend isn't fully up to date, but Swarm keeps it behind because it so often breaks on latest
     // so let's de-aggro the message a bit.
@@ -1305,6 +1374,9 @@ function comfyToggleButtonsVisible() {
         if (swarmComfyBreadcrumbs) {
             swarmComfyBreadcrumbs.style.paddingLeft = '250px';
         }
+        if (swarmComfySubGraphBar) {
+            swarmComfySubGraphBar.style.paddingLeft = '250px';
+        }
         localStorage.removeItem('comfy_buttons_closed');
     }
     else {
@@ -1322,6 +1394,9 @@ function comfyToggleButtonsVisible() {
         }
         if (swarmComfyBreadcrumbs) {
             swarmComfyBreadcrumbs.style.paddingLeft = '0';
+        }
+        if (swarmComfySubGraphBar) {
+            swarmComfySubGraphBar.style.paddingLeft = '0';
         }
         localStorage.setItem('comfy_buttons_closed', 'true');
     }
@@ -1346,6 +1421,9 @@ featureSetChangedCallbacks.push(() => {
     if (hasAny && !comfyHasTriedToLoad) {
         comfyHasTriedToLoad = true;
         comfyReloadObjectInfo(false);
+    }
+    if (isVisible(getRequiredElementById('Server-Info'))) {
+        comfyTorchManager.refresh();
     }
 });
 

@@ -1,4 +1,4 @@
-﻿using FreneticUtilities.FreneticExtensions;
+using FreneticUtilities.FreneticExtensions;
 using FreneticUtilities.FreneticToolkit;
 using LiteDB;
 using Newtonsoft.Json.Linq;
@@ -120,10 +120,10 @@ public static class OutputMetadataTracker
     }
 
     /// <summary>File format extensions that even can have metadata on them.</summary>
-    public static HashSet<string> ExtensionsWithMetadata = ["png", "jpg"];
+    public static HashSet<string> ExtensionsWithMetadata = ["png", "jpg", "webp", "wav", "flac", "ogg", "mp3", "aac", "mp4", "webm", "mov"];
 
     /// <summary>File format extensions that require ffmpeg to process image data.</summary>
-    public static HashSet<string> ExtensionsForFfmpegables = ["webm", "mp4", "mov"];
+    public static HashSet<string> ExtensionsForFfmpegables = ["webm", "mp4", "mov", "wav", "flac", "ogg", "mp3", "aac"];
 
     /// <summary>File format extensions that are animations in an image file format.</summary>
     public static HashSet<string> ExtensionsForAnimatedImages = ["webp", "gif"];
@@ -150,8 +150,7 @@ public static class OutputMetadataTracker
         file = file.Replace('\\', '/');
         string ext = file.AfterLast('.');
         string folder = file.BeforeAndAfterLast('/', out string filename);
-        MediaType expectedMediaType = MediaType.GetByExtension(ext);
-        if (expectedMediaType is not null && expectedMediaType.MetaType == MediaMetaType.Audio)
+        if (file.EndsWith(".swarmpreview.jpg") || file.EndsWith(".swarmpreview.webp"))
         {
             return null;
         }
@@ -273,7 +272,8 @@ public static class OutputMetadataTracker
             }
             if (fileData is null)
             {
-                byte[] data = File.ReadAllBytes(altExists ? altPreview : file);
+                string target = altExists ? altPreview : file;
+                byte[] data = File.ReadAllBytes(target);
                 if (data.Length == 0)
                 {
                     return null;
@@ -288,7 +288,7 @@ public static class OutputMetadataTracker
                 }
                 else
                 {
-                    ImageFile newFile = new Image(data, MediaType.GetByExtension(ext));
+                    ImageFile newFile = new Image(data, MediaType.GetByExtension(target.AfterLast('.')));
                     fileData = newFile.ToMetadataJpg()?.RawData;
                 }
             }
@@ -321,6 +321,10 @@ public static class OutputMetadataTracker
         file = file.Replace('\\', '/');
         string ext = file.AfterLast('.');
         string folder = file.BeforeAndAfterLast('/', out string filename);
+        if (file.EndsWith(".swarmpreview.jpg") || file.EndsWith(".swarmpreview.webp"))
+        {
+            return null;
+        }
         if (!Program.ServerSettings.Metadata.ImageMetadataPerFolder)
         {
             filename = file;
@@ -377,18 +381,19 @@ public static class OutputMetadataTracker
         try
         {
             string altMetaPath = $"{file.BeforeLast('.')}.swarm.json";
-            if (ExtensionsWithMetadata.Contains(ext))
+            if (File.Exists(altMetaPath))
+            {
+                fileData = File.ReadAllText(altMetaPath);
+            }
+            else if (ExtensionsWithMetadata.Contains(ext))
             {
                 byte[] data = File.ReadAllBytes(file);
                 if (data.Length == 0)
                 {
                     return null;
                 }
-                fileData = new Image(data, MediaType.GetByExtension(ext)).GetMetadata();
-            }
-            if (string.IsNullOrWhiteSpace(fileData) && File.Exists(altMetaPath))
-            {
-                fileData = File.ReadAllText(altMetaPath);
+                MediaType type = MediaType.GetByExtension(ext);
+                fileData = type.MetaType.FromRawData(data, type).GetMetadata();
             }
             string subPath = file.StartsWith(root) ? file[root.Length..] : Path.GetRelativePath(root, file);
             subPath = subPath.Replace('\\', '/').Trim('/');

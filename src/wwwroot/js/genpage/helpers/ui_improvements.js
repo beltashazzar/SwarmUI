@@ -26,7 +26,7 @@ class AdvancedPopover {
             this.textInput.placeholder = 'Search...';
             this.textInput.addEventListener('input', (e) => {
                 this.buildList();
-                this.optionArea.style.width = (this.optionArea.offsetWidth + this.overExtendBy) + 'px';
+                this.fitOptionAreaWidth();
             });
             this.textInput.addEventListener('keydown', (e) => {
                 this.onKeyDown(e);
@@ -45,7 +45,15 @@ class AdvancedPopover {
             this.textInput.focus();
         }
         this.created = Date.now();
-        this.optionArea.style.width = (this.optionArea.offsetWidth + this.overExtendBy) + 'px';
+        this.fitOptionAreaWidth();
+        this.scrollFix();
+    }
+
+    /** Size the option list to its text content (not the parent/viewport width). */
+    fitOptionAreaWidth() {
+        this.optionArea.style.width = 'max-content';
+        let contentW = this.optionArea.offsetWidth;
+        this.optionArea.style.width = `${Math.min(contentW + this.overExtendBy, window.innerWidth - 40)}px`;
     }
 
     remove() {
@@ -211,20 +219,22 @@ class AdvancedPopover {
         let y;
         let maxHeight;
         let extraHeight = (this.textInput ? this.textInput.offsetHeight : 0) + 32;
-        let rawExpected = Math.min(this.expectedHeight, this.heightLimit);
+        let halfCap = Math.max(48, window.innerHeight * 0.45 - extraHeight);
+        let rawExpected = Math.min(this.expectedHeight, this.heightLimit, halfCap);
         let expected = rawExpected + extraHeight;
         if (this.targetY + expected < window.innerHeight) {
             y = this.targetY;
             maxHeight = rawExpected;
         }
         else if (this.flipYHeight != null && this.targetY > window.innerHeight / 2) {
+            maxHeight = Math.min(Math.max(0, this.targetY - this.flipYHeight - extraHeight), rawExpected);
+            expected = maxHeight + extraHeight;
             y = Math.max(0, this.targetY - this.flipYHeight - expected);
             this.popover.classList.add('sui_popover_reverse');
-            maxHeight = Math.min(this.targetY - this.flipYHeight - 32, rawExpected);
         }
         else {
             y = this.targetY;
-            maxHeight = window.innerHeight - y - extraHeight - 10;
+            maxHeight = Math.min(rawExpected, window.innerHeight - y - extraHeight - 10);
         }
         this.popover.style.top = `${y}px`;
         this.optionArea.style.maxHeight = `${maxHeight}px`;
@@ -283,6 +293,18 @@ class UIImprovementHandler {
             }
         });
         document.addEventListener('mouseup', () => {
+            if (this.videoControlDragging) {
+                this.videoControlDragging.isDragging = false;
+                this.videoControlDragging = null;
+            }
+        });
+        document.addEventListener('pointerup', () => {
+            if (this.videoControlDragging) {
+                this.videoControlDragging.isDragging = false;
+                this.videoControlDragging = null;
+            }
+        });
+        document.addEventListener('pointercancel', () => {
             if (this.videoControlDragging) {
                 this.videoControlDragging.isDragging = false;
                 this.videoControlDragging = null;
@@ -417,8 +439,14 @@ class UIImprovementHandler {
             }
             isDoingADrag = true;
             let files = this.getFileList(e.dataTransfer, e);
-            if (files.length > 0 && files.filter(f => f.type.startsWith('image/')).length > 0) {
+            if (files.length > 0 && files.filter(f => f.type.startsWith('image/') || f.type.startsWith('video/') || f.type == 'application/json').length > 0) {
                 let targets = document.getElementsByClassName('drag_image_target');
+                for (let target of targets) {
+                    target.classList.add('drag_image_target_highlight');
+                }
+            }
+            if (files.length > 0 && files.filter(f => f.type.startsWith('audio/')).length > 0) {
+                let targets = document.getElementsByClassName('drag_audio_target');
                 for (let target of targets) {
                     target.classList.add('drag_image_target_highlight');
                 }
@@ -428,6 +456,10 @@ class UIImprovementHandler {
             setTimeout(() => {
                 isDoingADrag = false;
                 let targets = document.getElementsByClassName('drag_image_target'); // intentionally don't search "_highlight" due to browse misbehavior
+                for (let target of targets) {
+                    target.classList.remove('drag_image_target_highlight');
+                }
+                targets = document.getElementsByClassName('drag_audio_target');
                 for (let target of targets) {
                     target.classList.remove('drag_image_target_highlight');
                 }
@@ -501,8 +533,23 @@ class UIImprovementHandler {
         }
         let popId = `uiimprover_${elem.id}`;
         let rect = elem.getBoundingClientRect();
-        let buttons = [...elem.options].filter(o => o.style.display != 'none').map(o => { return { key_html: o.dataset.cleanname, title: o.title, key: o.innerText, searchable: `${o.dataset.cleanname} ${o.innerText} ${o.value}`, action: () => { elem.value = o.value; triggerChangeFor(elem); } }; })
-        this.lastPopover = new AdvancedPopover(popId, buttons, true, rect.x, rect.y, elem.parentElement, elem.selectedIndex < 0 ? null : elem.selectedOptions[0].innerText, 0);
+        let options = [...elem.options].filter(o => o.style.display != 'none');
+        /* TEMP Firefox v152 bugfix: if elem options duplicate, rebuild the options list */
+        let duplicates = options.filter(o => options.findLastIndex(o2 => o2.value == o.value) != options.indexOf(o));
+        if (duplicates.length > 0) {
+            console.log(`Duplicate value found for ${elem.id}: ${duplicates.map(o => o.value).join(', ')}`);
+            options = [... elem.options];
+            let newOptions = options.filter(o => o.style.display == 'none' || options.findIndex(o2 => o2.value == o.value) == options.indexOf(o));
+            let val = elem.value;
+            elem.innerHTML = '';
+            for (let o of newOptions) {
+                elem.appendChild(o);
+            }
+            elem.value = val;
+        }
+        let buttons = [...elem.options].filter(o => o.style.display != 'none').map(o => { return { key_html: o.dataset.cleanname, title: o.title, key: o.innerText, searchable: `${o.dataset.cleanname} ${o.innerText} ${o.value}`, action: () => { o.selected = true; triggerChangeFor(elem); } }; });
+        let root = elem.closest('.modal') || document.body;
+        this.lastPopover = new AdvancedPopover(popId, buttons, true, rect.x, rect.y, root, elem.selectedIndex < 0 ? null : elem.selectedOptions[0].innerText, 0);
         e.preventDefault();
         e.stopPropagation();
         return false;
@@ -541,168 +588,6 @@ class UIImprovementHandler {
 
 uiImprover = new UIImprovementHandler();
 
-/** Helper class to inject custom JS video controls to a 'video' element. */
-class VideoControls {
-
-    constructor(videoElement) {
-        this.video = videoElement;
-        this.isDragging = false;
-        this.createControls();
-    }
-
-    /** Creates the controls UI for the video. */
-    createControls() {
-        let container = this.video.parentElement;
-        let controls = createDiv(null, 'video-controls', `
-            <button data-action="play">▶</button>
-            <span class="video-time">0:00</span>
-            <div class="video-progress"><div class="video-progress-inner"><div></div></div></div>
-            <span class="video-time">0:00</span>
-            <button data-action="volume">🔊</button>
-            <div class="auto-slider-range-wrapper" style="${getRangeStyle(100, 0, 100)}; width: 80px;">
-                <input class="auto-slider-range" type="range" value="100" min="0" max="100" step="1" data-ispot="false" autocomplete="off" oninput="updateRangeStyle(this)" onchange="updateRangeStyle(this)">
-            </div>
-        `);
-        container.appendChild(controls);
-        this.controls = controls;
-        this.playBtn = controls.querySelector('[data-action="play"]');
-        this.volumeBtn = controls.querySelector('[data-action="volume"]');
-        this.currentTimeEl = controls.querySelectorAll('.video-time')[0];
-        this.durationEl = controls.querySelectorAll('.video-time')[1];
-        this.progressBar = controls.querySelector('.video-progress');
-        this.progressBarInner = this.progressBar.querySelector('.video-progress-inner');
-        this.progressFilled = this.progressBarInner.querySelector('div');
-        this.volumeSlider = controls.querySelector('input[type="range"]');
-        this.volumeSlider.dataset.lastRealVolume = "100";
-        this.playBtn.addEventListener('click', () => this.togglePlay());
-        this.video.addEventListener('timeupdate', () => this.updateProgress());
-        this.video.addEventListener('loadedmetadata', () => this.updateDuration());
-        this.video.addEventListener('play', () => this.updateIcons());
-        this.video.addEventListener('pause', () => this.updateIcons());
-        container.addEventListener('mouseenter', () => { controls.style.opacity = 1; });
-        container.addEventListener('mouseleave', () => { controls.style.opacity = 0; });
-        this.progressBar.addEventListener('click', (e) => this.seek(e));
-        this.progressBar.addEventListener('mousedown', () => { this.isDragging = true; uiImprover.videoControlDragging = this; });
-        this.volumeSlider.addEventListener('input', (e) => this.setVolume(e));
-        this.volumeBtn.addEventListener('click', () => this.toggleMute());
-        let userSetting = typeof getUserSetting == 'function' ? getUserSetting('audio.videoaudiobehavior', 'last') : 'play';
-        if (userSetting == 'play') {
-            this.video.muted = false;
-        }
-        else if (userSetting == 'silent') {
-            this.volumeSlider.value = 0;
-            this.volumeSlider.dataset.lastRealVolume = "0";
-            this.video.volume = 0;
-            this.video.muted = true;
-        }
-        else { // Remember last
-            let lastVolume = localStorage.getItem('audiovolume_last') || "100";
-            let lastMuted = localStorage.getItem('audiovolume_lastmuted') == "true";
-            this.volumeSlider.value = lastMuted ? 0 : parseFloat(lastVolume);
-            this.volumeSlider.dataset.lastRealVolume = lastVolume;
-            this.video.volume = parseFloat(lastVolume) / 100;
-            this.video.muted = lastMuted;
-        }
-        this.updateIcons();
-    }
-
-    /** Helper to format a time in seconds into a MM:SS string. */
-    formatTime(seconds) {
-        let mins = Math.floor(seconds / 60);
-        let secs = Math.floor(seconds % 60);
-        return `${mins}:${secs.toString().padStart(2, '0')}`;
-    }
-
-    /** Toggles the play/pause state of the video. */
-    togglePlay() {
-        if (this.video.paused) {
-            this.video.play();
-        }
-        else {
-            this.video.pause();
-        }
-        this.updateIcons();
-    }
-
-    /** Updates the progress bar to match the video. */
-    updateProgress() {
-        let percent = (this.video.currentTime / this.video.duration) * 100;
-        this.progressFilled.style.width = `${percent}%`;
-        this.currentTimeEl.textContent = this.formatTime(this.video.currentTime);
-    }
-
-    /** Updates the duration UI text to match the video. */
-    updateDuration() {
-        this.durationEl.textContent = this.formatTime(this.video.duration);
-    }
-
-    /** Seeks the video to a specific time based on a click event on the progress bar. */
-    seek(e) {
-        let rect = this.progressBar.getBoundingClientRect();
-        let percent = (e.clientX - rect.left) / rect.width;
-        this.video.currentTime = percent * this.video.duration;
-    }
-
-    /** Handles the dragging of the progress bar to seek the video. */
-    drag(e) {
-        if (!this.isDragging) {
-            return;
-        }
-        let rect = this.progressBar.getBoundingClientRect();
-        let percent = (e.clientX - rect.left) / rect.width;
-        percent = Math.max(0, Math.min(1, percent));
-        this.video.currentTime = percent * this.video.duration;
-    }
-
-    /** Sets the volume of the video explicitly based on a slider event. */
-    setVolume(e) {
-        let volume = e.target.value / 100;
-        e.target.dataset.lastRealVolume = `${e.target.value}`;
-        this.video.volume = volume;
-        this.video.muted = volume < 0.001;
-        localStorage.setItem('audiovolume_last', `${e.target.value}`);
-        localStorage.setItem('audiovolume_lastmuted', `${this.video.muted}`);
-        this.updateIcons();
-    }
-
-    /** Toggles the mute state of the video. */
-    toggleMute() {
-        this.video.muted = !this.video.muted;
-        if (this.video.muted) {
-            this.volumeSlider.value = 0;
-        }
-        else if (this.volumeSlider.dataset.lastRealVolume) {
-            this.video.volume = parseFloat(this.volumeSlider.dataset.lastRealVolume) / 100;
-            if (this.video.volume < 0.01) {
-                this.video.volume = 0.5;
-            }
-        }
-        localStorage.setItem('audiovolume_lastmuted', `${this.video.muted}`);
-        this.updateIcons();
-    }
-
-    /** Updates the icons for the play and volume buttons. */
-    updateIcons() {
-        let volume = this.video.muted ? 0 : this.video.volume;
-        this.volumeSlider.value = volume * 100;
-        updateRangeStyle(this.volumeSlider);
-        if (volume == 0) {
-            this.volumeBtn.textContent = '🔇';
-        }
-        else if (volume < 0.5) {
-            this.volumeBtn.textContent = '🔉';
-        }
-        else {
-            this.volumeBtn.textContent = '🔊';
-        }
-        if (this.video.paused) {
-            this.playBtn.textContent = '▶';
-        }
-        else {
-            this.playBtn.textContent = '⏸';
-        }
-    }
-}
 
 ///////////// Older-style popover code, to be cleaned
 

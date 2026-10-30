@@ -1,14 +1,37 @@
-import torch, struct, json
+import torch, struct, json, threading
 from io import BytesIO
+from PIL import Image
 import latent_preview, comfy
 from server import PromptServer
-from comfy.model_base import SDXL, SVD_img2vid, Flux, Flux2, WAN21, Chroma
-from comfy import samplers, nested_tensor
+from comfy.model_base import SDXL, SVD_img2vid, Flux, Flux2, WAN21, Chroma, QwenImage21
+from comfy import nested_tensor
 import numpy as np
 from math import ceil
-from latent_preview import TAESDPreviewerImpl
 from comfy_execution.utils import get_executing_context
 from comfy_extras.nodes_flux import Flux2Scheduler
+from comfy_extras.nodes_ideogram4 import ideogram4_sigmas
+from comfy_extras.nodes_custom_sampler import Guider_DualModel
+
+_preview_lock = threading.Lock()
+_preview_sampler_active = False
+_last_preview_step_sent = -1
+
+if not getattr(latent_preview.preview_to_image, "_swarm_patched", False):
+    _original_preview_to_image = latent_preview.preview_to_image
+    # Copy/paste of preview_to_image but with the Image.fromarray on unloaded data removed
+    def _swarm_preview_to_image(latent_image, do_scale=True):
+        if not _preview_sampler_active:
+            return _original_preview_to_image(latent_image, do_scale)
+        if do_scale:
+            latents_ubyte = (((latent_image + 1.0) / 2.0).clamp(0, 1).mul(0xFF))
+        else:
+            latents_ubyte = (latent_image.clamp(0, 1).mul(0xFF))
+        if comfy.model_management.directml_enabled:
+            latents_ubyte = latents_ubyte.to(dtype=torch.uint8)
+        latents_ubyte = latents_ubyte.to(device="cpu", dtype=torch.uint8, non_blocking=comfy.model_management.device_supports_non_blocking(latent_image.device))
+        return latents_ubyte
+    _swarm_preview_to_image._swarm_patched = True
+    latent_preview.preview_to_image = _swarm_preview_to_image
 
 def slerp(val, low, high):
     low_norm = low / torch.norm(low, dim=1, keepdim=True)
@@ -22,24 +45,45 @@ def slerp(val, low, high):
     return res
 
 
-def swarm_partial_noise(seed, latent_image):
-    generator = torch.manual_seed(seed)
+def slerp_flat(val, low, high):
+    low_flat = low.reshape(-1)
+    high_flat = high.reshape(-1)
+    low_length = torch.linalg.vector_norm(low_flat)
+    high_length = torch.linalg.vector_norm(high_flat)
+    if low_length == 0 or high_length == 0:
+        return torch.lerp(low, high, val)
+    dot = torch.clamp(torch.dot(low_flat / low_length, high_flat / high_length), -1.0, 1.0)
+    if torch.abs(dot) > 0.9995:
+        return torch.lerp(low, high, val)
+    omega = torch.acos(dot)
+    so = torch.sin(omega)
+    return torch.sin((1.0 - val) * omega) / so * low + torch.sin(val * omega) / so * high
+
+
+def swarm_partial_noise(seed, latent_image, generator=None):
+    if generator is None:
+        generator = torch.manual_seed(seed)
     return torch.randn(latent_image.size(), dtype=latent_image.dtype, layout=latent_image.layout, generator=generator, device="cpu")
 
 
-def swarm_fixed_noise_inner(seed, latent_image, var_seed, var_seed_strength):
+def swarm_fixed_noise_inner(seed, latent_image, var_seed, var_seed_strength, generators=None, var_generators=None, use_flat_slerp=False):
     noises = []
     for i in range(latent_image.size()[0]):
         if var_seed_strength > 0:
-            noise = swarm_partial_noise(seed, latent_image[i])
-            var_noise = swarm_partial_noise(var_seed + i, latent_image[i])
+            generator = generators[i] if generators is not None else None
+            var_generator = var_generators[i] if var_generators is not None else None
+            noise = swarm_partial_noise(seed, latent_image[i], generator)
+            var_noise = swarm_partial_noise(var_seed + i, latent_image[i], var_generator)
             if noise.ndim == 4: # Video models are B C F H W, we're in a B loop already so sub-iterate over F (Frames)
                 for j in range(noise.shape[1]):
                     noise[:, j] = slerp(var_seed_strength, noise[:, j], var_noise[:, j])
+            elif use_flat_slerp:
+                noise = slerp_flat(var_seed_strength, noise, var_noise)
             else:
                 noise = slerp(var_seed_strength, noise, var_noise)
         else:
-            noise = swarm_partial_noise(seed + i, latent_image[i])
+            generator = generators[i] if generators is not None else None
+            noise = swarm_partial_noise(seed + i, latent_image[i], generator)
         noises.append(noise)
     return torch.stack(noises, dim=0)
 
@@ -47,9 +91,13 @@ def swarm_fixed_noise_inner(seed, latent_image, var_seed, var_seed_strength):
 def swarm_fixed_noise(seed, latent_image, var_seed, var_seed_strength):
     if latent_image.is_nested:
         tensors = latent_image.unbind()
+        batch_size = max(t.size()[0] for t in tensors)
+        generators = [torch.Generator(device="cpu").manual_seed(seed if var_seed_strength > 0 else seed + i) for i in range(batch_size)]
+        var_generators = [torch.Generator(device="cpu").manual_seed(var_seed + i) for i in range(batch_size)] if var_seed_strength > 0 else None
         noises = []
         for t in tensors:
-            noises.append(swarm_fixed_noise_inner(seed, t, var_seed, var_seed_strength))
+            use_flat_slerp = t.ndim == 4 and t.shape[2] == 2
+            noises.append(swarm_fixed_noise_inner(seed, t, var_seed, var_seed_strength, generators, var_generators, use_flat_slerp))
         return nested_tensor.NestedTensor(noises)
     else:
         return swarm_fixed_noise_inner(seed, latent_image, var_seed, var_seed_strength)
@@ -118,34 +166,48 @@ def make_swarm_sampler_callback(steps, device, model, previews):
     def callback(step, x0, x, total_steps):
         pbar.update_absolute(step + 1, total_steps, None)
         if previewer:
-            if (step == 0 or (step < 3 and x0.ndim == 5 and x0.shape[1] > 8)) and not isinstance(previewer, TAESDPreviewerImpl):
-                x0 = x0.clone().cpu() # Sync copy to CPU for first few steps to prevent reading old data, more steps for videos. Future steps allow comfy to do its async non_blocky stuff.
+            if getattr(x0, "is_nested", False) and hasattr(x0, "tensors"):
+                x0 = x0.tensors[0]
             if x0.ndim == 5:
                 # video shape is [batch, channels, backwards time, width, height], for previews needs to be swapped to [forwards time, channels, width, height]
                 x0 = x0[0].permute(1, 0, 2, 3)
-                x0 = torch.flip(x0, [0])
-            def do_preview(id, index):
-                preview_img = previewer.decode_latent_to_preview_image("JPEG", x0[index:index+1])
-                swarm_send_extra_preview(id, preview_img[1])
+                #x0 = torch.flip(x0, [0]) # it is unclear when the backwardsness applies or not
+            def decode(index):
+                return previewer.decode_latent_to_preview_image("JPEG", x0[index:index+1])[1]
+            animated = False
+            frames = []
             if previews == "iterate":
-                do_preview(0, step % x0.shape[0])
+                frames = [(0, decode(step % x0.shape[0]))]
             elif previews == "animate":
                 if x0.shape[0] == 1:
-                    do_preview(0, 0)
+                    frames = [(0, decode(0))]
                 else:
-                    images = []
-                    for i in range(x0.shape[0]):
-                        preview_img = previewer.decode_latent_to_preview_image("JPEG", x0[i:i+1])
-                        images.append(preview_img[1])
-                    swarm_send_animated_preview(0, images)
+                    animated = True
+                    frames = [decode(i) for i in range(x0.shape[0])]
             elif previews == "default":
-                for i in range(x0.shape[0]):
-                    preview_img = previewer.decode_latent_to_preview_image("JPEG", x0[i:i+1])
-                    swarm_send_extra_preview(i, preview_img[1])
+                frames = [(i, decode(i)) for i in range(x0.shape[0])]
             elif previews == "one":
-                do_preview(0, 0)
+                frames = [(0, decode(0))]
             elif previews == "second":
-                do_preview(0, 1 % x0.shape[0])
+                frames = [(0, decode(1 % x0.shape[0]))]
+            event = None
+            if getattr(x0.device, "type", None) == "cuda":
+                event = torch.cuda.Event()
+                event.record()
+            def send_preview():
+                global _last_preview_step_sent
+                if event is not None:
+                    event.synchronize()
+                with _preview_lock:
+                    if not _preview_sampler_active or step < _last_preview_step_sent:
+                        return
+                    if animated:
+                        swarm_send_animated_preview(0, [Image.fromarray(tensor.numpy()) for tensor in frames])
+                    else:
+                        for id, tensor in frames:
+                            swarm_send_extra_preview(id, Image.fromarray(tensor.numpy()))
+                    _last_preview_step_sent = step
+            threading.Thread(target=send_preview, daemon=True).start()
     return callback
 
 
@@ -170,6 +232,7 @@ AYS_NOISE_LEVELS = {
     # Flux and Wan from https://github.com/comfyanonymous/ComfyUI/pull/7584
     "Flux": [0.9968, 0.9886, 0.9819, 0.975, 0.966, 0.9471, 0.9158, 0.8287, 0.5512, 0.2808, 0.001],
     "Flux2": [1.0, 0.6509, 0.4374, 0.2932, 0.1893, 0.1108, 0.0495, 0.00031], # https://huggingface.co/fal/FLUX.2-dev-Turbo#usage
+    "QwenImage21": [1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0.001], # https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo/blob/main/model_index.json with a tail value
     "Wan": [1.0, 0.997, 0.995, 0.993, 0.991, 0.989, 0.987, 0.985, 0.98, 0.975, 0.973, 0.968, 0.96, 0.946, 0.927, 0.902, 0.864, 0.776, 0.539, 0.208, 0.001],
     # https://github.com/comfyanonymous/ComfyUI/commit/08ff5fa08a92e0b3f23b9abec979a830a6cffb03#diff-3e4e70e402dcd9e1070ad71ef9292277f10d9faccf36a1c405c0c717a7ee6485R23
     "Chroma": [0.992, 0.99, 0.988, 0.985, 0.982, 0.978, 0.973, 0.968, 0.961, 0.953, 0.943, 0.931, 0.917, 0.9, 0.881, 0.858, 0.832, 0.802, 0.769, 0.731, 0.69, 0.646, 0.599, 0.55, 0.501, 0.451, 0.402, 0.355, 0.311, 0.27, 0.232, 0.199, 0.169, 0.143, 0.12, 0.101, 0.084, 0.07, 0.058, 0.048, 0.001]
@@ -219,6 +282,18 @@ def split_latent_tensor(latent_tensor, tile_size=1024, scale_factor=8):
     return tiles
 
 
+def crop_conditioning(conditioning, coords):
+    """Crop SeedVR2 spatial conditioning to a tile without modifying the full-image conditioning."""
+    left, upper, right, lower = coords
+    result = []
+    for embedding, metadata in conditioning:
+        metadata = metadata.copy()
+        if "condition" in metadata:
+            metadata["condition"] = metadata["condition"][..., upper:lower, left:right]
+        result.append([embedding, metadata])
+    return result
+
+
 def stitch_latent_tensors(original_size, tiles, scale_factor=8):
     """Stitch tiles together to create the final upscaled latent tensor with overlaps."""
     result = torch.zeros(original_size)
@@ -258,6 +333,48 @@ def stitch_latent_tensors(original_size, tiles, scale_factor=8):
 
     return result
 
+#comfy/ComfyUI/comfy/samplers.py - sample
+def samplers_sample(model, noise, positive, negative, cfg, device, sampler, sigmas, model_options={}, latent_image=None, denoise_mask=None, callback=None, disable_pbar=False, seed=None, model_negative=None):
+    # Guider_DualModel(model, model_negative) if model_negative is not None else comfy.samplers.CFGGuider(model)
+    cfg_guider = Guider_DualModel(model, model_negative) if model_negative is not None else comfy.samplers.CFGGuider(model)
+    cfg_guider.set_conds(positive, negative)
+    cfg_guider.set_cfg(cfg)
+    return cfg_guider.sample(noise, latent_image, sampler, sigmas, denoise_mask, callback, disable_pbar, seed)
+
+
+#comfy/ComfyUI/comfy/samplers.py - KSampler
+class PatchedKSampler(comfy.samplers.KSampler):
+    def sample(self, noise, positive, negative, cfg, latent_image=None, start_step=None, last_step=None, force_full_denoise=False, denoise_mask=None, sigmas=None, callback=None, disable_pbar=False, seed=None, model_negative=None):
+        if sigmas is None:
+            sigmas = self.sigmas
+
+        if last_step is not None and last_step < (len(sigmas) - 1):
+            sigmas = sigmas[:last_step + 1]
+            if force_full_denoise:
+                sigmas[-1] = 0
+
+        if start_step is not None:
+            if start_step < (len(sigmas) - 1):
+                sigmas = sigmas[start_step:]
+            else:
+                if latent_image is not None:
+                    return latent_image
+                else:
+                    return torch.zeros_like(noise)
+
+        sampler = comfy.samplers.sampler_object(self.sampler)
+
+        return samplers_sample(self.model, noise, positive, negative, cfg, self.device, sampler, sigmas, self.model_options, latent_image=latent_image, denoise_mask=denoise_mask, callback=callback, disable_pbar=disable_pbar, seed=seed, model_negative=model_negative)
+
+
+#comfy/ComfyUI/comfy/sample.py - sample
+def sample_sample(model, noise, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=1.0, disable_noise=False, start_step=None, last_step=None, force_full_denoise=False, noise_mask=None, sigmas=None, callback=None, disable_pbar=False, seed=None, model_negative=None):
+    sampler = PatchedKSampler(model, steps=steps, device=model.load_device, sampler=sampler_name, scheduler=scheduler, denoise=denoise, model_options=model.model_options)
+
+    samples = sampler.sample(noise, positive, negative, cfg=cfg, latent_image=latent_image, start_step=start_step, last_step=last_step, force_full_denoise=force_full_denoise, denoise_mask=noise_mask, sigmas=sigmas, callback=callback, disable_pbar=disable_pbar, seed=seed, model_negative=model_negative)
+    samples = samples.to(device=comfy.model_management.intermediate_device(), dtype=comfy.model_management.intermediate_dtype())
+    return samples
+
 
 class SwarmKSampler:
     @classmethod
@@ -269,7 +386,7 @@ class SwarmKSampler:
                 "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
                 "cfg": ("FLOAT", {"default": 8.0, "min": 0.0, "max": 100.0, "step": 0.5, "round": 0.001}),
                 "sampler_name": (comfy.samplers.KSampler.SAMPLERS, ),
-                "scheduler": (["turbo", "align_your_steps", "ltxv", "ltxv-image", "flux2"] + comfy.samplers.KSampler.SCHEDULERS, ),
+                "scheduler": (["turbo", "align_your_steps", "ltxv", "ltxv-image", "flux2", "ideogram4", "ideogram4turbo"] + comfy.samplers.KSampler.SCHEDULERS, ),
                 "positive": ("CONDITIONING", ),
                 "negative": ("CONDITIONING", ),
                 "latent_image": ("LATENT", ),
@@ -285,6 +402,9 @@ class SwarmKSampler:
                 "previews": (["default", "none", "one", "second", "iterate", "animate"], ),
                 "tile_sample": ("BOOLEAN", {"default": False}),
                 "tile_size": ("INT", {"default": 1024, "min": 256, "max": 4096}),
+            },
+            "optional": {
+                "model_negative": ("MODEL", ),
             }
         }
 
@@ -293,14 +413,14 @@ class SwarmKSampler:
     FUNCTION = "run_sampling"
     DESCRIPTION = "Works like a vanilla Comfy KSamplerAdvanced, but with extra inputs for advanced features such as sigma scale, tiling, previews, etc."
 
-    def sample(self, model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, start_at_step, end_at_step, var_seed, var_seed_strength, sigma_max, sigma_min, rho, add_noise, return_with_leftover_noise, previews):
+    def sample(self, model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, start_at_step, end_at_step, var_seed, var_seed_strength, sigma_max, sigma_min, rho, add_noise, return_with_leftover_noise, previews, model_negative=None):
         device = comfy.model_management.get_torch_device()
         latent_samples = latent_image["samples"]
         latent_samples = comfy.sample.fix_empty_latent_channels(model, latent_samples)
         disable_noise = add_noise == "disable"
 
         if disable_noise:
-            noise = torch.zeros(latent_samples.size(), dtype=latent_samples.dtype, layout=latent_samples.layout, device="cpu")
+            noise = comfy.sample.prepare_empty_noise(latent_samples)
         else:
             noise = swarm_fixed_noise(noise_seed, latent_samples, var_seed, var_seed_strength)
 
@@ -308,6 +428,8 @@ class SwarmKSampler:
         if "noise_mask" in latent_image:
             noise_mask = latent_image["noise_mask"]
 
+        width = latent_image["samples"].shape[-1]
+        height = latent_image["samples"].shape[-2]
         sigmas = None
         if scheduler == "turbo":
             timesteps = torch.flip(torch.arange(1, 11) * 100 - 1, (0,))[:steps]
@@ -317,8 +439,6 @@ class SwarmKSampler:
             from comfy_extras.nodes_lt import LTXVScheduler
             sigmas = LTXVScheduler.execute(steps, 2.05, 0.95, True, 0.1, latent_image if scheduler == "ltxv-image" else None).result[0]
         elif scheduler == "flux2":
-            width = latent_image["samples"].shape[-1]
-            height = latent_image["samples"].shape[-2]
             sigmas = Flux2Scheduler.execute(steps, width * 16, height * 16).result[0]
         elif scheduler == "align_your_steps":
             if isinstance(model.model, SDXL):
@@ -333,6 +453,8 @@ class SwarmKSampler:
                 model_type = "Wan"
             elif isinstance(model.model, Chroma):
                 model_type = "Chroma"
+            elif isinstance(model.model, QwenImage21):
+                model_type = "QwenImage21"
             else:
                 print(f"AlignYourSteps: Unknown model type: {type(model.model)}, defaulting to SD1")
                 model_type = "SD1"
@@ -341,6 +463,10 @@ class SwarmKSampler:
                 sigmas = loglinear_interp(sigmas, steps + 1)
             sigmas[-1] = 0
             sigmas = torch.FloatTensor(sigmas)
+        elif scheduler == "ideogram4":
+            sigmas = ideogram4_sigmas(steps, width * 16, height * 16, 0, 1.75)
+        elif scheduler == "ideogram4turbo":
+            sigmas = ideogram4_sigmas(steps, width * 16, height * 16, 0.5, 1.75)
         elif sigma_min >= 0 and sigma_max >= 0 and scheduler in ["karras", "exponential"]:
             if sampler_name in ['dpm_2', 'dpm_2_ancestral']:
                 sigmas = calculate_sigmas_scheduler(model, scheduler, steps + 1, sigma_min, sigma_max, rho)
@@ -351,16 +477,24 @@ class SwarmKSampler:
         
         out = latent_image.copy()
         if steps > 0:
-            callback = make_swarm_sampler_callback(steps, device, model, previews)
+            global _preview_sampler_active, _last_preview_step_sent
+            with _preview_lock:
+                _preview_sampler_active = True
+                _last_preview_step_sent = -1
+            try:
+                callback = make_swarm_sampler_callback(steps, device, model, previews)
 
-            samples = comfy.sample.sample(model, noise, steps, cfg, sampler_name, scheduler, positive, negative, latent_samples,
-                                    denoise=1.0, disable_noise=disable_noise, start_step=start_at_step, last_step=end_at_step,
-                                    force_full_denoise=return_with_leftover_noise == "disable", noise_mask=noise_mask, sigmas=sigmas, callback=callback, seed=noise_seed)
-            out["samples"] = samples
+                samples = sample_sample(model, noise, steps, cfg, sampler_name, scheduler, positive, negative, latent_samples,
+                                        denoise=1.0, disable_noise=disable_noise, start_step=start_at_step, last_step=end_at_step,
+                                        force_full_denoise=return_with_leftover_noise == "disable", noise_mask=noise_mask, sigmas=sigmas, callback=callback, seed=noise_seed, model_negative=model_negative)
+                out["samples"] = samples
+            finally:
+                with _preview_lock:
+                    _preview_sampler_active = False
         return (out, )
 
     # tiled sample version of sample function
-    def tiled_sample(self, model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, start_at_step, end_at_step, var_seed, var_seed_strength, sigma_max, sigma_min, rho, add_noise, return_with_leftover_noise, previews, tile_size):
+    def tiled_sample(self, model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, start_at_step, end_at_step, var_seed, var_seed_strength, sigma_max, sigma_min, rho, add_noise, return_with_leftover_noise, previews, tile_size, model_negative=None):
         out = latent_image.copy()
         # split image into tiles
         latent_samples = latent_image["samples"]
@@ -368,18 +502,20 @@ class SwarmKSampler:
         # resample each tile using self.sample
         resampled_tiles = []
         for coords, tile in tiles:
-            resampled_tile = self.sample(model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, {"samples": tile}, start_at_step, end_at_step, var_seed, var_seed_strength, sigma_max, sigma_min, rho, add_noise, return_with_leftover_noise, previews)
+            tile_positive = crop_conditioning(positive, coords)
+            tile_negative = crop_conditioning(negative, coords)
+            resampled_tile = self.sample(model, noise_seed, steps, cfg, sampler_name, scheduler, tile_positive, tile_negative, {"samples": tile}, start_at_step, end_at_step, var_seed, var_seed_strength, sigma_max, sigma_min, rho, add_noise, return_with_leftover_noise, previews, model_negative)
             resampled_tiles.append((coords, resampled_tile[0]["samples"]))
         # stitch the tiles to get the final upscaled image
         result = stitch_latent_tensors(latent_samples.shape, resampled_tiles)
         out["samples"] = result
         return (out,)
 
-    def run_sampling(self, model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, start_at_step, end_at_step, var_seed, var_seed_strength, sigma_max, sigma_min, rho, add_noise, return_with_leftover_noise, previews, tile_sample,  tile_size):
+    def run_sampling(self, model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, start_at_step, end_at_step, var_seed, var_seed_strength, sigma_max, sigma_min, rho, add_noise, return_with_leftover_noise, previews, tile_sample,  tile_size, model_negative=None):
         if tile_sample:
-            return self.tiled_sample(model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, start_at_step, end_at_step, var_seed, var_seed_strength, sigma_max, sigma_min, rho, add_noise, return_with_leftover_noise, previews, tile_size)
+            return self.tiled_sample(model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, start_at_step, end_at_step, var_seed, var_seed_strength, sigma_max, sigma_min, rho, add_noise, return_with_leftover_noise, previews, tile_size, model_negative=model_negative)
         else:
-            return self.sample(model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, start_at_step, end_at_step, var_seed, var_seed_strength, sigma_max, sigma_min, rho, add_noise, return_with_leftover_noise, previews)
+            return self.sample(model, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, start_at_step, end_at_step, var_seed, var_seed_strength, sigma_max, sigma_min, rho, add_noise, return_with_leftover_noise, previews, model_negative=model_negative)
 
 
 NODE_CLASS_MAPPINGS = {

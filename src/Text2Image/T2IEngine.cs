@@ -1,4 +1,4 @@
-﻿using FreneticUtilities.FreneticExtensions;
+using FreneticUtilities.FreneticExtensions;
 using Newtonsoft.Json.Linq;
 using SwarmUI.Accounts;
 using SwarmUI.Backends;
@@ -29,14 +29,14 @@ namespace SwarmUI.Text2Image
         public static Action<PostGenerationEventParams> PostGenerateEvent;
 
         /// <summary>Paramters for <see cref="PostGenerateEvent"/>.</summary>
-        public record class PostGenerationEventParams(MediaFile File, T2IParamInput UserInput, Action RefuseImage);
+        public record class PostGenerationEventParams(MediaFile File, T2IParamInput UserInput, Action RefuseImage, string BackendInternalHint = null);
 
         /// <summary>Extension event, fired after a batch of images were generated.
         /// Use "RefuseImage" to mark an image as removed. Note that it may have already been shown to a user, when the live result websocket API is in use.</summary>
         public static Action<PostBatchEventParams> PostBatchEvent;
 
         /// <summary>Feature flags that don't block a backend from running, such as model-specific flags.</summary>
-        public static HashSet<string> DisregardedFeatureFlags = ["sd3", "flux-dev", "text2video", "cascade", "sdxl", "text2audio"];
+        public static HashSet<string> DisregardedFeatureFlags = ["sd3", "flux-dev", "text2video", "cascade", "sdxl", "text2audio", "audio_ace_inputs", "optional_reference_latent", "model_has_ipadapter", "supports_reference_only", "supports_hypertile"];
 
         /// <summary>Parameters for <see cref="PostBatchEvent"/>.</summary>
         public record class PostBatchEventParams(T2IParamInput UserInput, ImageOutput[] Images);
@@ -66,6 +66,9 @@ namespace SwarmUI.Text2Image
 
             /// <summary>An action that will remove/discard this file as relevant.</summary>
             public Action RefuseImage;
+
+            /// <summary>Optional text identifying some internal hint from the backend, such as a Comfy Node ID. Format or content not guaranteed, use with caution and validation checks.</summary>
+            public string BackendInternalHint;
         }
 
         /// <summary>List of functions that take a pair of userinput and backend, and returns true if they can fit together, or false if the pair is not valid (add to user_input.RefusalReasons if so).</summary>
@@ -221,7 +224,7 @@ namespace SwarmUI.Text2Image
                     copyInput.ExtraMeta["intermediate"] = "intermediate output";
                 }
                 bool refuse = false;
-                PostGenerateEvent?.Invoke(new(img.File, copyInput, () => refuse = true));
+                PostGenerateEvent?.Invoke(new(img.File, copyInput, () => refuse = true, img.BackendInternalHint));
                 if (refuse)
                 {
                     Logs.Info($"Refused an image.");
@@ -266,8 +269,7 @@ namespace SwarmUI.Text2Image
                 PreGenerateEvent?.Invoke(new(user_input));
                 claim.Extend(backendWaits: 1);
                 sendStatus();
-                backend = await Program.Backends.GetNextT2IBackend(TimeSpan.FromMinutes(backendTimeoutMin), user_input.Get(T2IParamTypes.Model), user_input,
-                    filter: BackendMatcherFor(user_input), session: user_input.SourceSession, notifyWillLoad: sendStatus, cancel: claim.InterruptToken);
+                backend = await Program.Backends.GetNextT2IBackend(TimeSpan.FromMinutes(backendTimeoutMin), user_input.Get(T2IParamTypes.Model), user_input, filter: BackendMatcherFor(user_input), session: user_input.SourceSession, notifyWillLoad: sendStatus, cancel: claim.InterruptToken);
             }
             catch (SwarmReadableErrorException ex)
             {

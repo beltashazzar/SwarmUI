@@ -1,4 +1,4 @@
-﻿using SwarmUI.Utils;
+using SwarmUI.Utils;
 using SwarmUI.Core;
 using System.Collections.Concurrent;
 using LiteDB;
@@ -181,6 +181,8 @@ public class SessionHandler
 
         public string OriginUserAgent { get; set; }
 
+        public long CreatedUnixTime { get; set; }
+
         public long LastActiveUnixTime { get; set; }
 
         public string ValidationHash { get; set; }
@@ -255,6 +257,15 @@ public class SessionHandler
                 continue;
             }
             Roles[id] = new Role(id);
+            // NOTE: just setting defaults for old configs, fds data will override
+            if (id == "owner" || id == "admin")
+            {
+                Roles[id].Data.MaxQueued = 999_999_999;
+            }
+            else if (id == "guest")
+            {
+                Roles[id].Data.MaxQueued = 10;
+            }
             Roles[id].Data.Load(data);
         }
         TrackedPermissions = [.. (rolesData.GetRootData("___$tracked") ?? new(new List<FDSData>())).AsStringList];
@@ -265,6 +276,7 @@ public class SessionHandler
             r.Data.Name = "Owner";
             r.Data.Description = "(Auto Generated Role, cannot delete). The owner of the server, local user when account system is disabled. Generally should have all permissions ever always.";
             r.Data.MaxT2ISimultaneous = PatchOwnerMaxT2I;
+            r.Data.MaxQueued = 999_999_999;
             r.Data.MaxOutPathDepth = PatchOwnerMaxDepth;
             r.Data.AllowUnsafeOutpaths = PatchOwnerAllowUnsafe;
         }
@@ -274,6 +286,7 @@ public class SessionHandler
             Roles["admin"] = r;
             r.Data.Name = "Admin";
             r.Data.Description = "(Auto Generated Role, cannot delete). An administrator of the server, has near-total control.";
+            r.Data.MaxQueued = 999_999_999;
         }
         if (!Roles.ContainsKey("poweruser"))
         {
@@ -295,6 +308,7 @@ public class SessionHandler
             Roles["guest"] = r;
             r.Data.Name = "Guest";
             r.Data.Description = "(Auto Generated Role, cannot delete). An unregistered or unverified guest account. Only when public unverified access is enabled.";
+            r.Data.MaxQueued = 10;
         }
         bool fixCurse = Roles["guest"].Data.PermissionFlags.Contains("*"); // Patch for prerel default * to everyone.
         foreach (string roleId in new string[] { "guest", "user", "poweruser", "admin", "owner" })
@@ -310,7 +324,14 @@ public class SessionHandler
         GenericSharedUser = GetUser("__shared");
         Utilities.RunCheckedTask(async () =>
         {
-            await Task.Delay(TimeSpan.FromSeconds(10), Program.GlobalProgramCancel);
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(10), Program.GlobalProgramCancel);
+            }
+            catch (TaskCanceledException)
+            {
+                return;
+            }
             CleanOldSessions();
         });
     }

@@ -1,4 +1,7 @@
-﻿namespace SwarmUI.Media;
+using Newtonsoft.Json.Linq;
+using SwarmUI.Utils;
+
+namespace SwarmUI.Media;
 
 /// <summary>Base class, represents a single media data file.</summary>
 public class MediaFile
@@ -9,6 +12,9 @@ public class MediaFile
     /// <summary>The file type.</summary>
     public MediaType Type;
 
+    /// <summary>When this file was loaded from a user path (eg <c>inputs/my/image.png</c>), this is the original path. Otherwise null.</summary>
+    public string SourceFilePath;
+
     /// <summary>Get a Base64 string representation of the raw image data. This does a conversion on call, so use sparingly.</summary>
     public string AsBase64 => Convert.ToBase64String(RawData);
 
@@ -16,6 +22,19 @@ public class MediaFile
     public string AsDataString()
     {
         return $"data:{Type.MimeType};base64,{AsBase64}";
+    }
+
+
+    /// <summary>Returns the metadata from this media file, or null if none.</summary>
+    public virtual string GetMetadata()
+    {
+        return null;
+    }
+
+    /// <summary>Parses Swarm <c>sui_image_params</c> from a metadata string, or null.</summary>
+    public static JObject GetSUIMetadata(string metadata)
+    {
+        return metadata?.ParseToJson()?["sui_image_params"]?.Value<JObject>();
     }
 
     /// <inheritdoc/>

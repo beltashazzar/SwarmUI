@@ -1,5 +1,6 @@
-﻿using FreneticUtilities.FreneticExtensions;
+using FreneticUtilities.FreneticExtensions;
 using Newtonsoft.Json.Linq;
+using SwarmUI.Accounts;
 using SwarmUI.Backends;
 using SwarmUI.Builtin_ComfyUIBackend;
 using SwarmUI.Text2Image;
@@ -89,9 +90,7 @@ public class Installation
             }
             else
             {
-                //await Utilities.DownloadFile("https://github.com/comfyanonymous/ComfyUI/releases/latest/download/ComfyUI_windows_portable_nvidia.7z", "dlbackend/comfyui_dl.7z", UpdateProgress);
-                // TODO: Comfy updated default to python 3.13, but 3.13 is super unstable and incompatible, so use an older package
-                await Utilities.DownloadFile("https://github.com/comfyanonymous/ComfyUI/releases/download/v0.3.49/ComfyUI_windows_portable_nvidia.7z", "dlbackend/comfyui_dl.7z", UpdateProgress);
+                await Utilities.DownloadFile("https://github.com/comfyanonymous/ComfyUI/releases/latest/download/ComfyUI_windows_portable_nvidia.7z", "dlbackend/comfyui_dl.7z", UpdateProgress);
             }
         }
         catch (HttpRequestException ex)
@@ -115,7 +114,7 @@ public class Installation
             {
                 Directory.Move("dlbackend/tmpcomfy/ComfyUI_windows_portable_nightly_pytorch", "dlbackend/comfy");
             }
-        };
+        }
         try
         {
             moveFolder();
@@ -209,7 +208,7 @@ public class Installation
             gpu = mostVRAM.ID;
         }
         await Output("Enabling ComfyUI...");
-        Program.Backends.AddNewOfType(Program.Backends.BackendTypes["comfyui_selfstart"], new ComfyUISelfStartBackend.ComfyUISelfStartSettings() { StartScript = path, GPU_ID = $"{gpu}", ExtraArgs = extraArgs.Trim(), EnablePreviews = enablePreviews ? "true" : "false"});
+        Program.Backends.AddNewOfType(Program.Backends.BackendTypes["comfyui_selfstart"], new ComfyUISelfStartBackend.ComfyUISelfStartSettings() { StartScript = path, GPU_ID = $"{gpu}", ExtraArgs = extraArgs.Trim(), EnablePreviews = enablePreviews ? "true" : "false" });
     }
 
     /// <summary>Configure the backend during installation.</summary>
@@ -231,7 +230,7 @@ public class Installation
     }
 
     /// <summary>Run model downloads during installation.</summary>
-    public static async Task Models(string models)
+    public static async Task Models(string models, Session session)
     {
         if (models == "none")
         {
@@ -246,7 +245,7 @@ public class Installation
             await Output($"Downloading model from '{modelInfo.URL}'... please wait...");
             try
             {
-                await modelInfo.DownloadNow(UpdateProgress);
+                await modelInfo.DownloadNow(UpdateProgress, session);
             }
             catch (SwarmReadableErrorException ex)
             {
@@ -296,15 +295,22 @@ public class Installation
         Program.ServerSettings.IsInstalled = true;
         Program.ServerSettings.InstallDate = $"{DateTimeOffset.Now:yyyy-MM-dd}";
         Program.ServerSettings.InstallVersion = Utilities.Version;
-        if (Program.ServerSettings.LaunchMode == "webinstall")
+        if (Program.ServerSettings.LaunchMode == "install")
         {
-            Program.ServerSettings.LaunchMode = "web";
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                Program.ServerSettings.LaunchMode = "app";
+            }
+            else
+            {
+                Program.ServerSettings.LaunchMode = "web";
+            }
         }
         Program.SaveSettingsFile();
     }
 
     /// <summary>Main install function entry point.</summary>
-    public static async Task Install(WebSocket socket, string theme, string installed_for, string backend, string models, bool install_amd, string language, bool make_shortcut)
+    public static async Task Install(WebSocket socket, string theme, string installed_for, string backend, string models, bool install_amd, string language, bool make_shortcut, Session session)
     {
         if (Directory.Exists("dlbackend/comfy"))
         {
@@ -333,7 +339,7 @@ public class Installation
             MakeShortcut();
         }
         SettingsApply();
-        await Models(models);
+        await Models(models, session);
         StepsThusFar++;
         UpdateProgress(0, 0, 0);
         await Program.Backends.ReloadAllBackends();

@@ -342,10 +342,15 @@ function setSelectionRange(el, start, end) {
     let foundStart = false;
     let charCount = 0
     let endCharCount;
+    function isSpacer(node) { return node.tagName == 'BR' || (node.parentElement?.classList?.contains('wc_line_spacer')); }
     for (let i = 0; i < textNodes.length; i++) {
         let textNode = textNodes[i];
         endCharCount = charCount + (textNode.tagName == 'BR' ? 1 : textNode.textContent.length);
         if (!foundStart && start >= charCount && (i == textNodes.length - 1 ? start <= endCharCount : start < endCharCount)) {
+            range.setStart(textNode, start - charCount);
+            foundStart = true;
+        }
+        else if (!foundStart && start >= charCount && start == endCharCount && i + 1 < textNodes.length && isSpacer(textNodes[i + 1])) {
             range.setStart(textNode, start - charCount);
             foundStart = true;
         }
@@ -464,6 +469,42 @@ function toDataURL(url, callback) {
             callback(reader.result);
         }
         reader.readAsDataURL(xhr.response);
+    };
+    xhr.open('GET', url);
+    xhr.responseType = 'blob';
+    xhr.send();
+}
+
+/** Copies the image at the given URL (http(s) or data: URL) to the clipboard as image/png. */
+function copyImageToClipboard(url) {
+    if (!navigator.clipboard) {
+        let img = document.createElement('img');
+        img.src = url;
+        img.style.position = 'absolute';
+        img.style.opacity = '0';
+        img.style.left = '-999999px';
+        let focusedElement = document.activeElement;
+        document.body.appendChild(img);
+        let range = document.createRange();
+        range.selectNode(img);
+        let sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        document.execCommand('copy');
+        sel.removeAllRanges();
+        document.body.removeChild(img);
+        if (focusedElement) {
+            focusedElement.focus();
+        }
+        return;
+    }
+    let xhr = new XMLHttpRequest();
+    xhr.onload = function() {
+        let blob = xhr.response;
+        if (!blob) {
+            return;
+        }
+        navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
     };
     xhr.open('GET', url);
     xhr.responseType = 'blob';
@@ -823,6 +864,25 @@ function durationStringify(seconds) {
     return result;
 }
 
+/** Returns a duration as MM:SS, or HH:MM:SS when it is at least one hour long. */
+function durationStringifyColons(seconds, decimalPlaces = 0) {
+    decimalPlaces = Math.max(0, Math.floor(decimalPlaces));
+    if (!isFinite(seconds) || isNaN(seconds)) {
+        seconds = 0;
+    }
+    let precision = 10 ** decimalPlaces;
+    let durationUnits = Math.max(0, decimalPlaces > 0 ? Math.round(seconds * precision) : Math.floor(seconds));
+    let hours = Math.floor(durationUnits / (3600 * precision));
+    let minutes = Math.floor(durationUnits / (60 * precision)) % 60;
+    let wholeSeconds = Math.floor(durationUnits / precision) % 60;
+    let result = hours > 0 ? `${hours.toString().padStart(2, '0')}:` : '';
+    result += `${minutes.toString().padStart(2, '0')}:${wholeSeconds.toString().padStart(2, '0')}`;
+    if (decimalPlaces > 0) {
+        result += `.${(durationUnits % precision).toString().padStart(decimalPlaces, '0')}`;
+    }
+    return result;
+}
+
 /** Filters the array to only contain values for which the map function returns a distinct (unique) value. */
 function filterDistinctBy(array, map) {
     return array.filter((value, index) => {
@@ -873,6 +933,21 @@ function formatNumberClean(num, maxDigits) {
 
 /** Gets a data image URL from an image src. */
 function imageToData(src, callback, resize256 = false) {
+    if (src.startsWith('inputs/')) {
+        src = `${getImageOutPrefix()}/${src}`;
+    }
+    if (src.startsWith('https://image.civitai.com/')) {
+        genericRequest('ForwardImageRequest', { 'url': src }, (data) => {
+            if (!data.image) {
+                callback(null);
+                return;
+            }
+            imageToData(data.image, callback, resize256);
+        }, 0, () => {
+            callback(null);
+        });
+        return;
+    }
     if (resize256) {
         var image = new Image();
         image.crossOrigin = 'Anonymous';
@@ -889,6 +964,9 @@ function imageToData(src, callback, resize256 = false) {
                 context.drawImage(image, 0, 0, widthFixed, heightFixed);
                 callback(canvas.toDataURL('image/jpeg'));
         };
+        image.onerror = () => {
+            callback(null);
+        };
         image.src = src;
     }
     else {
@@ -899,6 +977,9 @@ function imageToData(src, callback, resize256 = false) {
                 callback(reader.result);
             };
             reader.readAsDataURL(xhr.response);
+        };
+        xhr.onerror = () => {
+            callback(null);
         };
         xhr.open('GET', src);
         xhr.responseType = 'blob';
@@ -1067,6 +1148,170 @@ function isAudioExt(filename) {
     return false;
 }
 
+/** Fetches/reads audio and returns its duration and downsampled waveform peaks. */
+async function getAudioWaveformData(audio, targetBars = 600) {
+    let audioBuffer;
+    if (typeof AudioBuffer != 'undefined' && audio instanceof AudioBuffer) {
+        audioBuffer = audio;
+    }
+    else {
+        let source = (typeof HTMLMediaElement != 'undefined' && audio instanceof HTMLMediaElement) ? (audio.currentSrc || audio.src) : audio;
+        let arrayBuffer;
+        if (source instanceof ArrayBuffer) {
+            arrayBuffer = source;
+        }
+        else if (ArrayBuffer.isView(source)) {
+            arrayBuffer = source.buffer.slice(source.byteOffset, source.byteOffset + source.byteLength);
+        }
+        else if (source instanceof Blob) {
+            arrayBuffer = await source.arrayBuffer();
+        }
+        else {
+            let response = await fetch(source, { credentials: 'same-origin' });
+            if (!response.ok) {
+                throw new Error(`Failed to fetch audio: ${response.status}`);
+            }
+            arrayBuffer = await response.arrayBuffer();
+        }
+        let Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!Ctx) {
+            throw new Error('Web Audio API is unavailable');
+        }
+        let audioContext = new Ctx();
+        try {
+            audioBuffer = await audioContext.decodeAudioData(arrayBuffer.slice(0));
+        }
+        finally {
+            audioContext.close();
+        }
+    }
+    if (audioBuffer.numberOfChannels < 1) {
+        return { duration: audioBuffer.duration, peaks: [] };
+    }
+    let blockSize = Math.max(1, Math.floor(audioBuffer.length / targetBars));
+    let numBars = Math.ceil(audioBuffer.length / blockSize);
+    let peaks = [];
+    for (let i = 0; i < numBars; i++) {
+        let start = i * blockSize;
+        let end = Math.min(start + blockSize, audioBuffer.length);
+        let peak = 0;
+        for (let c = 0; c < audioBuffer.numberOfChannels; c++) {
+            let data = audioBuffer.getChannelData(c);
+            for (let s = start; s < end; s++) {
+                peak = Math.max(peak, Math.abs(data[s]));
+            }
+        }
+        peaks.push(peak);
+    }
+    return { duration: audioBuffer.duration, peaks };
+}
+
+/** Fetches/reads audio and downsamples it into waveform peak values. */
+async function getAudioWaveformPeaks(audio, targetBars = 600) {
+    return (await getAudioWaveformData(audio, targetBars)).peaks;
+}
+
+/** Renders waveform peaks to a canvas. */
+function renderWaveform(canvas, peaks, options = {}) {
+    let width = options.width || canvas.clientWidth || canvas.width;
+    let height = options.height || canvas.clientHeight || canvas.height;
+    let pixelRatio = options.pixelRatio || 1;
+    canvas.width = Math.floor(width * pixelRatio);
+    canvas.height = Math.floor(height * pixelRatio);
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
+    let ctx = canvas.getContext('2d');
+    if (!ctx) {
+        return;
+    }
+    ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+    ctx.clearRect(0, 0, width, height);
+    if (options.backgroundColor) {
+        ctx.fillStyle = options.backgroundColor;
+        ctx.fillRect(0, 0, width, height);
+    }
+    let progress = Math.max(0, Math.min(1, options.progress || 0));
+    let playedColor = options.playedColor || '#6cf';
+    let waveformColor = options.waveformColor || 'rgba(255, 255, 255, 0.28)';
+    let mid = height / 2;
+    let lineHalf = 0.5;
+    ctx.fillStyle = waveformColor;
+    ctx.fillRect(0, mid - lineHalf, width, lineHalf * 2);
+    ctx.fillStyle = playedColor;
+    ctx.fillRect(0, mid - lineHalf, width * progress, lineHalf * 2);
+    if (peaks && peaks.length) {
+        let maxPeak = 0.0001;
+        for (let peak of peaks) {
+            maxPeak = Math.max(maxPeak, peak);
+        }
+        let maxHalfAmp = height * 0.42;
+        for (let i = 0; i < peaks.length; i++) {
+            let fraction = (i + 0.5) / peaks.length;
+            let amplitudeScale = typeof options.amplitudeScale == 'function' ? options.amplitudeScale(fraction) : (options.amplitudeScale ?? 1);
+            let norm = peaks[i] / maxPeak * Math.max(0, amplitudeScale);
+            if (norm < 0.018) {
+                continue;
+            }
+            let x0 = Math.floor((i / peaks.length) * width);
+            let x1 = Math.ceil(((i + 1) / peaks.length) * width);
+            ctx.fillStyle = fraction <= progress ? playedColor : waveformColor;
+            ctx.fillRect(x0, mid - norm * maxHalfAmp, Math.max(1, x1 - x0), norm * maxHalfAmp * 2);
+        }
+    }
+    if (options.hoverFraction != null && !isNaN(options.hoverFraction)) {
+        let x = options.hoverFraction * width;
+        if (x >= 0 && x <= width) {
+            ctx.strokeStyle = options.hoverColor || 'rgba(255, 255, 255, 0.75)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(x + 0.5, 0);
+            ctx.lineTo(x + 0.5, height);
+            ctx.stroke();
+        }
+    }
+}
+
+/** Renders audio as a waveform PNG data URL, with optional centered text or a waveform-to-text callback. */
+async function renderWaveformImage(audio, width, height, text = '') {
+    let waveform = await getAudioWaveformData(audio, width);
+    let canvas = document.createElement('canvas');
+    let styles = getComputedStyle(document.documentElement);
+    let backgroundColor = styles.getPropertyValue('--background-soft').trim() || '#222';
+    renderWaveform(canvas, waveform.peaks, {
+        width,
+        height,
+        progress: 1,
+        playedColor: styles.getPropertyValue('--emphasis').trim() || '#6cf',
+        backgroundColor
+    });
+    if (typeof text == 'function') {
+        text = text(waveform);
+    }
+    if (text) {
+        let ctx = canvas.getContext('2d');
+        ctx.font = `bold ${Math.max(12, Math.round(height * 0.09))}px sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.lineWidth = 4;
+        ctx.strokeStyle = backgroundColor;
+        ctx.strokeText(text, width / 2, height / 2);
+        ctx.fillStyle = styles.getPropertyValue('--text').trim() || '#fff';
+        ctx.fillText(text, width / 2, height / 2);
+    }
+    return canvas.toDataURL('image/png');
+}
+
+/** Returns 'video', 'audio', or 'image' based on the file source. */
+function getMediaType(src) {
+    if (isVideoExt(src)) {
+        return 'video';
+    }
+    if (isAudioExt(src)) {
+        return 'audio';
+    }
+    return 'image';
+}
+
 /** 'string.split' with a count limit, and without the stupid misbehavior of the default JS 'string.split'. */
 function splitWithTail(str, splitter, limit) {
     let parts = str.split(splitter);
@@ -1136,4 +1381,78 @@ async function ungzip(gzippedBytes) {
         chunks.push(value);
     }
     return new Uint8Array(chunks.reduce((acc, chunk) => [...acc, ...chunk], []));
+}
+
+/** Trims leading spaces from a string. */
+function trimStartSpaces(text) {
+    let count = 0;
+    for (let i = 0; i < text.length; i++) {
+        if (text[i] != ' ') {
+            break;
+        }
+        count++;
+    }
+    return text.substring(count);
+}
+
+/** Trims trailing spaces from a string. */
+function trimEndSpaces(text) {
+    let count = 0;
+    for (let i = text.length - 1; i >= 0; i--) {
+        if (text[i] != ' ') {
+            break;
+        }
+        count++;
+    }
+    return text.substring(0, text.length - count);
+}
+
+/** Trims leading and trailing spaces from a string. */
+function trimSpaces(text) {
+    return trimStartSpaces(trimEndSpaces(text));
+}
+
+/** Converts basic ANSI foreground color codes in already HTML-escaped text to colored spans. */
+function ansiHtml(text) {
+    let colors = { '30': '#000000', '31': '#cd3131', '32': '#0dbc79', '33': '#e5e510', '34': '#2472c8', '35': '#bc3fbc', '36': '#11a8cd', '37': '#e5e5e5', '90': '#666666', '91': '#f14c4c', '92': '#23d18b', '93': '#f5f543', '94': '#3b8eea', '95': '#d670d6', '96': '#29b8db', '97': '#ffffff' };
+    let result = '';
+    let currentColor = null;
+    let i = 0;
+    while (i < text.length) {
+        if (text.charCodeAt(i) == 27 && text[i + 1] == '[') {
+            let j = i + 2;
+            while (j < text.length && text[j] != 'm') {
+                j++;
+            }
+            if (j < text.length) {
+                let codes = text.substring(i + 2, j).split(';');
+                let newColor = currentColor;
+                for (let code of codes) {
+                    if (code == '' || code == '0') {
+                        newColor = null;
+                    }
+                    else if (colors[code]) {
+                        newColor = colors[code];
+                    }
+                }
+                if (newColor != currentColor) {
+                    if (currentColor != null) {
+                        result += '</span>';
+                    }
+                    if (newColor != null) {
+                        result += `<span style="color:${newColor}">`;
+                    }
+                    currentColor = newColor;
+                }
+                i = j + 1;
+                continue;
+            }
+        }
+        result += text[i];
+        i++;
+    }
+    if (currentColor != null) {
+        result += '</span>';
+    }
+    return result;
 }

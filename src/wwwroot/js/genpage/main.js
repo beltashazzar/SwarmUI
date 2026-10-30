@@ -10,8 +10,6 @@ let num_waiting_gens = 0, num_models_loading = 0, num_live_gens = 0, num_backend
 
 let shouldApplyDefault = false;
 
-let sessionReadyCallbacks = [];
-
 let allModels = [];
 
 let coreModelMap = {};
@@ -80,6 +78,7 @@ function updateCurrentStatusDirect(data) {
         total = 0;
     }
     getRequiredElementById('alt_interrupt_button').classList.toggle('interrupt-button-none', total == 0);
+    getRequiredElementById('simple_interrupt_button').classList.toggle('interrupt-button-none', total == 0);
     let oldInterruptButton = document.getElementById('interrupt_button');
     if (oldInterruptButton) {
         oldInterruptButton.classList.toggle('interrupt-button-none', total == 0);
@@ -204,9 +203,14 @@ function reviseBackendFeatureSet() {
     doCompatFeature('stable-diffusion-v3', 'sd3');
     doCompatFeature('stable-cascade-v1', 'cascade');
     doAnyArchFeature(['Flux.1-dev', 'flux.2-dev', 'flux.2-klein-4b', 'flux.2-klein-9b', 'hunyuan-video'], 'flux-dev');
+    doCompatFeature('krea-2', 'optional_reference_latent');
     doCompatFeature('stable-diffusion-xl-v1', 'sdxl');
-    doAnyCompatFeature(['genmo-mochi-1', 'lightricks-ltx-video', 'hunyuan-video', 'nvidia-cosmos-1', `wan-21`, `wan-22`, 'kandinsky5-vidlite', 'kandinsky5-vidpro'], 'text2video');
-    doAnyCompatFeature(['ace-step-1_5'], 'text2audio');
+    doAnyCompatFeature(['stable-diffusion-v1', 'stable-diffusion-xl-v1'], 'model_has_ipadapter');
+    doAnyCompatFeature(['stable-diffusion-v1', 'stable-diffusion-v2', 'stable-diffusion-xl-v1'], 'supports_reference_only');
+    doAnyCompatFeature(['stable-diffusion-v1', 'stable-diffusion-v2', 'stable-diffusion-xl-v1'], 'supports_hypertile');
+    doAnyCompatFeature(['genmo-mochi-1', 'lightricks-ltx-video', 'hunyuan-video', 'nvidia-cosmos-1', `wan-21`, `wan-22`, 'kandinsky5-vidlite', 'kandinsky5-vidpro', 'minimax-h3'], 'text2video');
+    doAnyCompatFeature(['ace-step-1_5', 'minimax-music-3', 'yue-2'], 'text2audio');
+    doCompatFeature('ace-step-1_5', 'audio_ace_inputs');
     for (let changer of featureSetChangers) {
         let [add, remove] = changer();
         addMe.push(...add);
@@ -477,6 +481,7 @@ function installTensorRT() {
 function clearPromptImages(hideRevision = true) {
     let promptImageArea = getRequiredElementById('alt_prompt_image_area');
     promptImageArea.innerHTML = '';
+    persistPromptMediaParams();
     let clearButton = getRequiredElementById('alt_prompt_image_clear_button');
     clearButton.style.display = 'none';
     if (hideRevision) {
@@ -524,33 +529,206 @@ function autoRevealRevision() {
     }
 }
 
+let promptImageReplaceTarget = null;
+
+function setPromptImageReplaceTarget(target) {
+    if (promptImageReplaceTarget) {
+        promptImageReplaceTarget.classList.remove('image-drop-replace-target');
+    }
+    promptImageReplaceTarget = target;
+    if (promptImageReplaceTarget) {
+        promptImageReplaceTarget.classList.add('image-drop-replace-target');
+    }
+}
+
+function getPromptImageDropReplaceTarget(e) {
+    if (uiImprover.getFileList(e.dataTransfer, e).length == 0) {
+        return null;
+    }
+    let target = e.target.closest('.alt-prompt-image-container');
+    if (!target || !target.querySelector('.alt-prompt-image')) {
+        return null;
+    }
+    return target;
+}
+
 function imagePromptAddImage(file) {
-    let clearButton = getRequiredElementById('alt_prompt_image_clear_button');
-    let promptImageArea = getRequiredElementById('alt_prompt_image_area');
+    let replaceTarget = promptImageReplaceTarget;
+    setPromptImageReplaceTarget(null);
     let reader = new FileReader();
     reader.onload = (e) => {
-        let data = e.target.result;
-        let imageContainer = createDiv(null, 'alt-prompt-image-container');
-        let imageRemoveButton = createSpan(null, 'alt-prompt-image-container-remove-button', '&times;');
-        imageRemoveButton.addEventListener('click', (e) => {
-            imageContainer.remove();
-            autoRevealRevision();
-            genTabLayout.altPromptSizeHandle();
-        });
-        imageRemoveButton.title = 'Remove this image';
-        imageContainer.appendChild(imageRemoveButton);
-        let imageObject = new Image();
-        imageObject.src = data;
-        imageObject.height = 128;
-        imageObject.className = 'alt-prompt-image';
-        imageObject.dataset.filedata = data;
-        imageContainer.appendChild(imageObject);
-        clearButton.style.display = '';
-        showRevisionInputs(true);
-        promptImageArea.appendChild(imageContainer);
-        genTabLayout.altPromptSizeHandle();
+        imagePromptAddImageData(e.target.result, file.type, e.target.result, file.name, replaceTarget);
     };
     reader.readAsDataURL(file);
+}
+
+/** Extracts a prompt video's audio on the server and attaches the saved audio result. */
+function imagePromptSplitVideoAudio(video, startMilliseconds = 0, endMilliseconds = -1, onComplete = null) {
+    genericRequest('EditMedia', { media: video.dataset.filedata, filename: video.dataset.filename || '', startMilliseconds, endMilliseconds, audioOnly: true }, result => {
+        imagePromptAddImageData(`${getImageOutPrefix()}/${result.result}`, 'audio', result.result, result.result);
+        if (inputBrowserHelper.inputImageBrowser) {
+            inputBrowserHelper.inputImageBrowser.lightRefresh();
+        }
+        onComplete?.(true);
+    }, 0, error => {
+        showError(error);
+        onComplete?.(false);
+    });
+}
+
+/** Removes one prompt media attachment and updates the surrounding UI. */
+function imagePromptRemoveMedia(media) {
+    media.closest('.alt-prompt-image-container').remove();
+    persistPromptMediaParams();
+    updatePromptMediaTitles();
+    autoRevealRevision();
+    genTabLayout.altPromptSizeHandle();
+}
+
+/** Shows the action menu for one prompt media attachment. */
+function showPromptMediaMenu(media, menuButton, x = null, y = null) {
+    let buttons = [];
+    if (media.tagName == 'VIDEO') {
+        buttons.push({
+            key: 'Split Audio',
+            title: "Extract this video's audio and attach it as a separate prompt audio input",
+            action: () => imagePromptSplitVideoAudio(media)
+        });
+    }
+    if (media.tagName == 'VIDEO' || media.tagName == 'AUDIO') {
+        let mediaName = media.tagName == 'AUDIO' ? 'audio' : 'video';
+        buttons.push({
+            key: `Advanced ${mediaName[0].toUpperCase()}${mediaName.substring(1)} Editor`,
+            title: `Trim${mediaName == 'video' ? ' or crop' : ''} this ${mediaName} and save the result`,
+            action: () => mediaEditorInterface.open(media)
+        });
+    }
+    buttons.push({
+        key: 'Remove',
+        title: `Remove this ${media.tagName.toLowerCase()}`,
+        action: () => imagePromptRemoveMedia(media)
+    });
+    if (x == null || y == null) {
+        let rect = menuButton.getBoundingClientRect();
+        x = rect.x;
+        y = rect.y + menuButton.offsetHeight + 6;
+    }
+    new AdvancedPopover('prompt_media_context_menu', buttons, false, x, y, document.body, null);
+}
+
+/** Updates prompt media title numbering, counted separately per media type. */
+function updatePromptMediaTitles() {
+    let typeNames = { IMG: 'Image', AUDIO: 'Audio', VIDEO: 'Video' };
+    let typeNamesShort = { IMG: 'Img', AUDIO: 'Aud', VIDEO: 'Vid' };
+    let typeCounts = { IMG: 0, AUDIO: 0, VIDEO: 0 };
+    let promptImageArea = getRequiredElementById('alt_prompt_image_area');
+    for (let media of promptImageArea.querySelectorAll('.alt-prompt-image')) {
+        typeCounts[media.tagName]++;
+        let filename = media.dataset.filename;
+        let displayFilename = filename?.replaceAll('\\', '/').split('/').pop();
+        let shortFilename = displayFilename?.length > 90 ? `${displayFilename.substring(0, 87)}...` : displayFilename;
+        let details = '';
+        if (media.tagName == 'AUDIO' && media.dataset.duration) {
+            details += ` (${media.dataset.duration}s)`;
+        }
+        else if (media.tagName == 'VIDEO' && media.dataset.duration) {
+            details += ` (${roundTo(parseFloat(media.dataset.duration), 0.01)}s)`;
+        }
+        if (media.dataset.resolution) {
+            let [width, height] = media.dataset.resolution.split('x').map(value => parseInt(value));
+            details += ` (${media.dataset.resolution}, ${describeAspectRatio(width, height)})`;
+        }
+        media.title = `${typeNames[media.tagName]} ${typeCounts[media.tagName]}${filename ? `: ${filename}` : ''}${details}`;
+        let headerText = media.closest('.alt-prompt-image-container').querySelector('.alt-prompt-image-container-header-text');
+        headerText.textContent = `${typeNamesShort[media.tagName]} ${typeCounts[media.tagName]}${shortFilename ? `: ${shortFilename}` : ''}${details}`;
+        headerText.title = media.title;
+    }
+}
+
+/** Adds image, video, or audio data to the prompt media area. */
+function imagePromptAddImageData(data, mediaType, fileData = data, fileName = null, replaceTarget = null) {
+    if (replaceTarget && !replaceTarget.isConnected) {
+        replaceTarget = null;
+    }
+    let existingImage = replaceTarget ? replaceTarget.querySelector('.alt-prompt-image') : null;
+    if (replaceTarget && !existingImage) {
+        replaceTarget = null;
+    }
+    let imageObject;
+    if (mediaType == 'video' || mediaType.startsWith('video/')) {
+        imageObject = document.createElement('video');
+        imageObject.controls = false;
+        imageObject.autoplay = true;
+        imageObject.muted = true;
+        imageObject.loop = true;
+    }
+    else if (mediaType == 'audio' || mediaType.startsWith('audio/')) {
+        imageObject = document.createElement('audio');
+        imageObject.controls = true;
+    }
+    else {
+        imageObject = new Image();
+    }
+    imageObject.height = 128;
+    imageObject.className = 'alt-prompt-image';
+    imageObject.dataset.filedata = fileData;
+    fileName = fileName || (isValidMediaPath(fileData) ? fileData : null);
+    if (fileName) {
+        imageObject.dataset.filename = fileName;
+    }
+    let type = mediaType.split('/')[0];
+    if (type == 'image') {
+        imageObject.addEventListener('load', () => {
+            imageObject.dataset.resolution = `${imageObject.naturalWidth}x${imageObject.naturalHeight}`;
+            updatePromptMediaTitles();
+        });
+    }
+    else {
+        imageObject.addEventListener('loadedmetadata', () => {
+            imageObject.dataset.duration = `${imageObject.duration}`;
+            if (type == 'video') {
+                imageObject.dataset.resolution = `${imageObject.videoWidth}x${imageObject.videoHeight}`;
+            }
+            updatePromptMediaTitles();
+        });
+    }
+    imageObject.src = data;
+    if (existingImage) {
+        existingImage.replaceWith(imageObject);
+    }
+    else {
+        let promptImageArea = getRequiredElementById('alt_prompt_image_area');
+        let imageContainer = createDiv(null, 'alt-prompt-image-container');
+        let imageHeader = createDiv(null, 'alt-prompt-image-container-header');
+        let imageHeaderText = createSpan(null, 'alt-prompt-image-container-header-text');
+        let imageMenuButton = createSpan(null, 'alt-prompt-image-container-menu-button', '&#9776;');
+        imageMenuButton.title = 'Prompt media options';
+        imageMenuButton.addEventListener('click', () => {
+            showPromptMediaMenu(imageContainer.querySelector('.alt-prompt-image'), imageMenuButton);
+        });
+        let imageRemoveButton = createSpan(null, 'alt-prompt-image-container-remove-button', '&times;');
+        imageRemoveButton.title = `Remove this ${type}`;
+        imageRemoveButton.addEventListener('click', () => {
+            imagePromptRemoveMedia(imageContainer.querySelector('.alt-prompt-image'));
+        });
+        imageHeader.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            showPromptMediaMenu(imageContainer.querySelector('.alt-prompt-image'), imageMenuButton, e.clientX, e.clientY);
+        });
+        imageHeader.appendChild(imageHeaderText);
+        imageHeader.appendChild(imageMenuButton);
+        imageHeader.appendChild(imageRemoveButton);
+        imageContainer.appendChild(imageHeader);
+        imageContainer.appendChild(imageObject);
+        promptImageArea.appendChild(imageContainer);
+    }
+    updatePromptMediaTitles();
+    let clearButton = getRequiredElementById('alt_prompt_image_clear_button');
+    clearButton.style.display = '';
+    showRevisionInputs(true);
+    genTabLayout.altPromptSizeHandle();
+    persistPromptMediaParams();
 }
 
 function imagePromptInputHandler() {
@@ -564,16 +742,45 @@ function imagePromptInputHandler() {
         clearPromptImages();
     });
     dragArea.addEventListener('drop', (e) => {
-        if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        let mediaPath = e.dataTransfer.getData(swarmMediaPathDataType);
+        if (isValidMediaPath(mediaPath)) {
             e.preventDefault();
             e.stopPropagation();
-            for (let file of e.dataTransfer.files) {
-                if (file.type.startsWith('image/')) {
+            let replaceTarget = promptImageReplaceTarget;
+            setPromptImageReplaceTarget(null);
+            imagePromptAddImageData(`${getImageOutPrefix()}/${mediaPath}`, getMediaType(mediaPath), mediaPath, mediaPath, replaceTarget);
+            return;
+        }
+        let files = uiImprover.getFileList(e.dataTransfer, e);
+        if (files.length > 0) {
+            e.preventDefault();
+            e.stopPropagation();
+            for (let file of files) {
+                if (file.type.startsWith('image/') || file.type.startsWith('video/') || file.type.startsWith('audio/')) {
                     imagePromptAddImage(file);
                 }
             }
         }
     });
+    let updateReplaceTarget = (e) => {
+        setPromptImageReplaceTarget(getPromptImageDropReplaceTarget(e));
+    };
+    dragArea.addEventListener('dragenter', updateReplaceTarget, true);
+    dragArea.addEventListener('dragover', updateReplaceTarget, true);
+    dragArea.addEventListener('dragleave', (e) => {
+        if (!dragArea.contains(e.relatedTarget)) {
+            setPromptImageReplaceTarget(null);
+        }
+    }, true);
+    dragArea.addEventListener('drop', (e) => {
+        setPromptImageReplaceTarget(getPromptImageDropReplaceTarget(e));
+    }, true);
+    document.addEventListener('drop', () => {
+        setPromptImageReplaceTarget(null);
+    }, true);
+    document.addEventListener('dragend', () => {
+        setPromptImageReplaceTarget(null);
+    }, true);
 }
 imagePromptInputHandler();
 
@@ -782,6 +989,5 @@ function genpageLoad() {
             swarmHasLoaded = true;
         });
         reviseStatusInterval = setInterval(reviseStatusBar, 2000);
-        window.resLoopInterval = setInterval(serverResourceLoop, 1000);
     });
 }

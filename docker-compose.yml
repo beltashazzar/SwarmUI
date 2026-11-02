@@ -16,7 +16,6 @@ services:
     # network_mode: host
     volumes:
       - swarmdata:/SwarmUI/Data
-      - swarmbackend:/SwarmUI/dlbackend
       - swarmdlnodes:/SwarmUI/src/BuiltinExtensions/ComfyUIBackend/DLNodes
       # A host folder rather than the swarmextensions volume, so the image build can compile
       # what is here; the runtime image has no SDK to compile at startup. Rebuild after
@@ -40,8 +39,6 @@ services:
 volumes:
   swarmdata:
     name: swarmdata
-  swarmbackend:
-    name: swarmbackend
   swarmdlnodes:
     name: swarmdlnodes
   swarmextensions:

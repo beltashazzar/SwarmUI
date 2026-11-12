@@ -19,7 +19,7 @@ services:
       - swarmdlnodes:/SwarmUI/src/BuiltinExtensions/ComfyUIBackend/DLNodes
       # A host folder rather than the swarmextensions volume, so the image build can compile
       # what is here; the runtime image has no SDK to compile at startup. Rebuild after
-      # installing or updating an extension. The old volume is kept as a rollback copy.
+      # installing or updating an extension.
       - ./src/Extensions:/SwarmUI/src/Extensions
       - ./Models:/SwarmUI/Models
       - ./Output:/SwarmUI/Output
@@ -41,8 +41,6 @@ volumes:
     name: swarmdata
   swarmdlnodes:
     name: swarmdlnodes
-  swarmextensions:
-    name: swarmextensions
 networks:
   ollama-net:
     name: ollama-net

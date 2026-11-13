@@ -1,5 +1,8 @@
 services:
   swarmui:
+    extends:  # estate CA bundle without the distrusted emSign roots: /opt/ca-trust/README.md
+      file: /opt/ca-trust/base.yml
+      service: ca-trust
     image: swarmui
     user: ${HOST_UID:-1000}:${HOST_GID:-1000}
     cap_drop:
